@@ -7,6 +7,7 @@ import dagger.internal.QualifierMetadata;
 import dagger.internal.ScopeMetadata;
 import javax.annotation.processing.Generated;
 import javax.inject.Provider;
+import okhttp3.OkHttpClient;
 
 @ScopeMetadata("javax.inject.Singleton")
 @QualifierMetadata("dagger.hilt.android.qualifiers.ApplicationContext")
@@ -24,20 +25,25 @@ import javax.inject.Provider;
 public final class AIModelRepositoryImpl_Factory implements Factory<AIModelRepositoryImpl> {
   private final Provider<Context> contextProvider;
 
-  public AIModelRepositoryImpl_Factory(Provider<Context> contextProvider) {
+  private final Provider<OkHttpClient> okHttpClientProvider;
+
+  public AIModelRepositoryImpl_Factory(Provider<Context> contextProvider,
+      Provider<OkHttpClient> okHttpClientProvider) {
     this.contextProvider = contextProvider;
+    this.okHttpClientProvider = okHttpClientProvider;
   }
 
   @Override
   public AIModelRepositoryImpl get() {
-    return newInstance(contextProvider.get());
+    return newInstance(contextProvider.get(), okHttpClientProvider.get());
   }
 
-  public static AIModelRepositoryImpl_Factory create(Provider<Context> contextProvider) {
-    return new AIModelRepositoryImpl_Factory(contextProvider);
+  public static AIModelRepositoryImpl_Factory create(Provider<Context> contextProvider,
+      Provider<OkHttpClient> okHttpClientProvider) {
+    return new AIModelRepositoryImpl_Factory(contextProvider, okHttpClientProvider);
   }
 
-  public static AIModelRepositoryImpl newInstance(Context context) {
-    return new AIModelRepositoryImpl(context);
+  public static AIModelRepositoryImpl newInstance(Context context, OkHttpClient okHttpClient) {
+    return new AIModelRepositoryImpl(context, okHttpClient);
   }
 }

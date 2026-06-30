@@ -8,6 +8,7 @@ import androidx.lifecycle.SavedStateHandle;
 import androidx.lifecycle.ViewModel;
 import com.localai.data.engine.LlamaCppEngineImpl;
 import com.localai.data.repository.AIModelRepositoryImpl;
+import com.localai.di.NetworkModule_ProvideOkHttpClientFactory;
 import com.localai.presentation.chat.ChatViewModel;
 import com.localai.presentation.chat.ChatViewModel_HiltModules_KeyModule_ProvideFactory;
 import com.localai.presentation.model.ModelManagerViewModel;
@@ -37,6 +38,7 @@ import java.util.Collections;
 import java.util.Map;
 import java.util.Set;
 import javax.annotation.processing.Generated;
+import okhttp3.OkHttpClient;
 
 @DaggerGenerated
 @Generated(
@@ -535,6 +537,8 @@ public final class DaggerLocalAiApplication_HiltComponents_SingletonC {
 
     private Provider<LlamaCppEngineImpl> llamaCppEngineImplProvider;
 
+    private Provider<OkHttpClient> provideOkHttpClientProvider;
+
     private Provider<AIModelRepositoryImpl> aIModelRepositoryImplProvider;
 
     private SingletonCImpl(ApplicationContextModule applicationContextModuleParam) {
@@ -546,11 +550,12 @@ public final class DaggerLocalAiApplication_HiltComponents_SingletonC {
     @SuppressWarnings("unchecked")
     private void initialize(final ApplicationContextModule applicationContextModuleParam) {
       this.llamaCppEngineImplProvider = DoubleCheck.provider(new SwitchingProvider<LlamaCppEngineImpl>(singletonCImpl, 0));
+      this.provideOkHttpClientProvider = DoubleCheck.provider(new SwitchingProvider<OkHttpClient>(singletonCImpl, 2));
       this.aIModelRepositoryImplProvider = DoubleCheck.provider(new SwitchingProvider<AIModelRepositoryImpl>(singletonCImpl, 1));
     }
 
     @Override
-    public void injectLocalAiApplication(LocalAiApplication arg0) {
+    public void injectLocalAiApplication(LocalAiApplication localAiApplication) {
     }
 
     @Override
@@ -586,7 +591,10 @@ public final class DaggerLocalAiApplication_HiltComponents_SingletonC {
           return (T) new LlamaCppEngineImpl();
 
           case 1: // com.localai.data.repository.AIModelRepositoryImpl 
-          return (T) new AIModelRepositoryImpl(ApplicationContextModule_ProvideContextFactory.provideContext(singletonCImpl.applicationContextModule));
+          return (T) new AIModelRepositoryImpl(ApplicationContextModule_ProvideContextFactory.provideContext(singletonCImpl.applicationContextModule), singletonCImpl.provideOkHttpClientProvider.get());
+
+          case 2: // okhttp3.OkHttpClient 
+          return (T) NetworkModule_ProvideOkHttpClientFactory.provideOkHttpClient();
 
           default: throw new AssertionError(id);
         }
