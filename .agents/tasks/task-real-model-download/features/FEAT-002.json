@@ -1,0 +1,23 @@
+{
+  "id": "FEAT-002",
+  "type": "fix",
+  "description": "Fix three issues identified in semantic review: response body leak on HTTP error, no cooperative cancellation support, and progress emission flood.",
+  "status": "in_progress",
+  "steps": [
+    "Wrap response handling with response.use { } to ensure the body is closed on all paths (including error)",
+    "Register OkHttp Call cancellation on coroutine completion using invokeOnCompletion, and add ensureActive() inside the read loop",
+    "Throttle progress emissions to only emit when integer percentage changes"
+  ],
+  "acceptance_criteria": [
+    "Response body is properly closed on error paths via response.use { }",
+    "OkHttp Call is cancelled when the coroutine is cancelled",
+    "ensureActive() is called inside the read loop for cooperative cancellation",
+    "Progress emissions are throttled to percentage-point changes (~100 emissions max for any file size)",
+    "New imports are added: kotlin.coroutines.coroutineContext, kotlinx.coroutines.ensureActive, kotlinx.coroutines.job"
+  ],
+  "verification": [
+    "Verify Kotlin syntax correctness of modified file"
+  ],
+  "blocked_reason": null,
+  "findings": null
+}
