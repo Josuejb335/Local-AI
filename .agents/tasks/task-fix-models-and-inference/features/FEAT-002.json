@@ -2,7 +2,7 @@
   "id": "FEAT-002",
   "type": "fix",
   "description": "Remove mock inference fallback from LlamaCppEngineImpl and fail clearly when native libraries are not available. Also clean up broken symlinks in JniLibs (uppercase) directory that may confuse the build.",
-  "status": "in_progress",
+  "status": "completed",
   "steps": [
     "In LlamaCppEngineImpl.kt, remove the fallbackInit() method and the mockGenerate() method entirely.",
     "In the initialize() method, when LlamaCppJniBridge.nativeLoaded is false, return Result.failure() with a clear error message like 'Native inference engine not available on this device. The required native libraries (libllama.so) could not be loaded for this device architecture.'",
@@ -26,5 +26,5 @@
     "Check that all references are consistent (no calls to removed methods)"
   ],
   "blocked_reason": null,
-  "findings": ""
+  "findings": "Successfully removed all mock/fallback inference code from LlamaCppEngineImpl.kt. Removed fallbackInit(), mockGenerate(), and useNative flag. The engine now fails clearly with a user-friendly error message when native libraries cannot be loaded, instead of silently falling back to mock output. Also removed app/src/main/JniLibs/ (uppercase J) directory containing 4 broken symlinks (libggml.so -> libggml.so.0, libllama.so -> libllama.so.0 for both arm64-v8a and x86_64) that pointed to nonexistent targets. The real native libraries remain in app/src/main/jniLibs/ (lowercase). Cannot run Gradle build due to INTEGRATIONS_ONLY network but code was verified for Kotlin syntax correctness and no dangling references."
 }
