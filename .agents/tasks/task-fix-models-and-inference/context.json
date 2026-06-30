@@ -1,0 +1,25 @@
+{
+  "project_type": "Android app with Kotlin, Jetpack Compose, Hilt DI, and llama.cpp JNI native inference",
+  "language": "Kotlin",
+  "build_system": "Gradle (build.gradle.kts) - cannot run in sandbox due to INTEGRATIONS_ONLY network",
+  "test_framework": "No unit tests exist in the project currently",
+  "build_command": "./gradlew assembleDebug (not runnable in sandbox)",
+  "test_command": "./gradlew test (not runnable in sandbox)",
+  "verification_instructions": "Verify code compiles by checking Kotlin syntax consistency. Gradle build cannot run in this sandbox.",
+  "snapshot_or_generated_files": null,
+  "setup_instructions": "Requires Android SDK, NDK for native lib builds. Native .so files are pre-built in app/src/main/jniLibs/",
+  "environment_constraints": "INTEGRATIONS_ONLY network - no external access. Cannot run Gradle, cannot download dependencies. Validation limited to code review and syntax checking.",
+  "contribution_requirements": "Commit to fix/real-model-download branch",
+  "key_patterns": "Hilt DI with @Singleton, OkHttp for network, Flow-based repository pattern, coroutines, Compose UI. Repository emits Flow<List<ModelInfo>> for remote models and Flow<DownloadState> for downloads. LlamaCppEngineImpl wraps JNI bridge to llama.cpp native library.",
+  "relevant_files": [
+    "app/src/main/java/com/localai/data/repository/AIModelRepositoryImpl.kt",
+    "app/src/main/java/com/localai/data/engine/LlamaCppEngineImpl.kt",
+    "app/src/main/java/com/localai/domain/model/ModelInfo.kt",
+    "app/src/main/java/com/localai/data/network/LlamaCppJniBridge.kt",
+    "app/src/main/java/com/localai/di/NetworkModule.kt",
+    "app/src/main/java/com/localai/presentation/model/ModelManagerViewModel.kt",
+    "app/build.gradle.kts",
+    "app/src/main/JniLibs/ (broken symlinks to remove)"
+  ],
+  "directory_structure": "Standard Android project: app/src/main/java/com/localai/ with data/, domain/, presentation/, di/ layers. Native JNI in app/src/main/jni/. Pre-built .so in app/src/main/jniLibs/{arm64-v8a,x86_64}/. Stale broken symlinks in app/src/main/JniLibs/ (uppercase J)."
+}

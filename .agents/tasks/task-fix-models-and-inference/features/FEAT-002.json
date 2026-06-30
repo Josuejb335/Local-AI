@@ -1,0 +1,30 @@
+{
+  "id": "FEAT-002",
+  "type": "fix",
+  "description": "Remove mock inference fallback from LlamaCppEngineImpl and fail clearly when native libraries are not available. Also clean up broken symlinks in JniLibs (uppercase) directory that may confuse the build.",
+  "status": "completed",
+  "steps": [
+    "In LlamaCppEngineImpl.kt, remove the fallbackInit() method and the mockGenerate() method entirely.",
+    "In the initialize() method, when LlamaCppJniBridge.nativeLoaded is false, return Result.failure() with a clear error message like 'Native inference engine not available on this device. The required native libraries (libllama.so) could not be loaded for this device architecture.'",
+    "In the initialize() method, when catching UnsatisfiedLinkError, return Result.failure() with a descriptive error instead of falling back to mock.",
+    "Remove the useNative flag since there is no longer a mock path. The engine either initializes successfully (native) or fails.",
+    "In the generate() method, remove the if/else branching between native and mock. Just call nativeGenerate() directly. If not initialized, throw IllegalStateException as before.",
+    "Remove the broken symlinks directory app/src/main/JniLibs/ (uppercase J) which contains broken symlinks (libggml.so -> libggml.so.0 which does not exist). The real libraries are in app/src/main/jniLibs/ (lowercase). The broken symlinks may cause packaging conflicts.",
+    "Ensure the ChatViewModel handles the Result.failure case properly - it already shows error in the UI via uiState.error, so the error message from LlamaCppEngineImpl will surface to the user."
+  ],
+  "acceptance_criteria": [
+    "LlamaCppEngineImpl no longer contains any mock/fallback code",
+    "When native libraries cannot be loaded, initialize() returns a clear failure result",
+    "The failure message is user-friendly and explains what is wrong",
+    "The broken JniLibs (uppercase) directory with symlinks is removed from git",
+    "Code compiles correctly (no references to removed methods)"
+  ],
+  "verification": [
+    "Read LlamaCppEngineImpl.kt and confirm no mock code remains",
+    "Verify the error messages are clear and user-friendly",
+    "Verify the JniLibs directory is removed",
+    "Check that all references are consistent (no calls to removed methods)"
+  ],
+  "blocked_reason": null,
+  "findings": "Successfully removed all mock/fallback inference code from LlamaCppEngineImpl.kt. Removed fallbackInit(), mockGenerate(), and useNative flag. The engine now fails clearly with a user-friendly error message when native libraries cannot be loaded, instead of silently falling back to mock output. Also removed app/src/main/JniLibs/ (uppercase J) directory containing 4 broken symlinks (libggml.so -> libggml.so.0, libllama.so -> libllama.so.0 for both arm64-v8a and x86_64) that pointed to nonexistent targets. The real native libraries remain in app/src/main/jniLibs/ (lowercase). Cannot run Gradle build due to INTEGRATIONS_ONLY network but code was verified for Kotlin syntax correctness and no dangling references."
+}
