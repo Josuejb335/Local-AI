@@ -1,0 +1,20 @@
+{
+  "buildFiles": [
+    "/home/josue/Projects/AI/SFT-llama/android/app/src/main/jni/CMakeLists.txt"
+  ],
+  "cleanCommandsComponents": [
+    [
+      "/home/josue/Android/Sdk/cmake/3.22.1/bin/ninja",
+      "-C",
+      "/home/josue/Projects/AI/SFT-llama/android/app/.cxx/Debug/6a15p4f1/x86_64",
+      "clean"
+    ]
+  ],
+  "buildTargetsCommandComponents": [
+    "/home/josue/Android/Sdk/cmake/3.22.1/bin/ninja",
+    "-C",
+    "/home/josue/Projects/AI/SFT-llama/android/app/.cxx/Debug/6a15p4f1/x86_64",
+    "{LIST_OF_TARGETS_TO_BUILD}"
+  ],
+  "libraries": {}
+}

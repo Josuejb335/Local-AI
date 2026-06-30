@@ -1,0 +1,1 @@
+/home/josue/Projects/AI/SFT-llama/android/app/src/main/jni/CMakeLists.txt
