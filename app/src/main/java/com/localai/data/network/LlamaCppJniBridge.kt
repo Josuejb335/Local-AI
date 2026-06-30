@@ -9,9 +9,10 @@ object LlamaCppJniBridge {
         private set
 
     init {
-        // Load in dependency order: ggml-base → ggml-cpu → ggml → llama
+        // Load in dependency order: omp → ggml-base → ggml-cpu → ggml → llama
+        // libomp.so (OpenMP) is required by libggml-base.so and libggml-cpu.so
         var allLoaded = true
-        for (lib in listOf("ggml-base", "ggml-cpu", "ggml", "llama")) {
+        for (lib in listOf("omp", "ggml-base", "ggml-cpu", "ggml", "llama")) {
             try {
                 System.loadLibrary(lib)
             } catch (e: UnsatisfiedLinkError) {
