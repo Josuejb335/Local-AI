@@ -5,10 +5,13 @@ import com.localai.domain.model.DownloadState
 import com.localai.domain.model.ModelInfo
 import com.localai.domain.repository.AIModelRepository
 import dagger.hilt.android.qualifiers.ApplicationContext
+import kotlin.coroutines.coroutineContext
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.flowOn
+import kotlinx.coroutines.job
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import java.io.File
@@ -81,33 +84,43 @@ class AIModelRepositoryImpl @Inject constructor(
                 .url(url)
                 .build()
 
-            val response = okHttpClient.newCall(request).execute()
+            val call = okHttpClient.newCall(request)
+            coroutineContext.job.invokeOnCompletion { call.cancel() }
+            val response = call.execute()
 
-            if (!response.isSuccessful) {
-                tmpFile.delete()
-                emit(DownloadState.Failed("Download failed: HTTP ${response.code}"))
-                return@flow
-            }
+            response.use { resp ->
+                if (!resp.isSuccessful) {
+                    tmpFile.delete()
+                    emit(DownloadState.Failed("Download failed: HTTP ${resp.code}"))
+                    return@flow
+                }
 
-            val body = response.body ?: run {
-                tmpFile.delete()
-                emit(DownloadState.Failed("Download failed: empty response body"))
-                return@flow
-            }
+                val body = resp.body ?: run {
+                    tmpFile.delete()
+                    emit(DownloadState.Failed("Download failed: empty response body"))
+                    return@flow
+                }
 
-            val contentLength = body.contentLength()
-            var bytesRead: Long = 0
+                val contentLength = body.contentLength()
+                var bytesRead: Long = 0
+                var lastEmittedPercent = -1
 
-            body.byteStream().use { inputStream ->
-                tmpFile.outputStream().use { outputStream ->
-                    val buffer = ByteArray(8192)
-                    var read: Int
-                    while (inputStream.read(buffer).also { read = it } != -1) {
-                        outputStream.write(buffer, 0, read)
-                        bytesRead += read
-                        if (contentLength > 0) {
-                            val progress = bytesRead.toFloat() / contentLength.toFloat()
-                            emit(DownloadState.InProgress(progress.coerceIn(0f, 1f)))
+                body.byteStream().use { inputStream ->
+                    tmpFile.outputStream().use { outputStream ->
+                        val buffer = ByteArray(8192)
+                        var read: Int
+                        while (inputStream.read(buffer).also { read = it } != -1) {
+                            coroutineContext.ensureActive()
+                            outputStream.write(buffer, 0, read)
+                            bytesRead += read
+                            if (contentLength > 0) {
+                                val progress = bytesRead.toFloat() / contentLength.toFloat()
+                                val percent = (progress * 100).toInt()
+                                if (percent != lastEmittedPercent) {
+                                    lastEmittedPercent = percent
+                                    emit(DownloadState.InProgress(progress.coerceIn(0f, 1f)))
+                                }
+                            }
                         }
                     }
                 }
