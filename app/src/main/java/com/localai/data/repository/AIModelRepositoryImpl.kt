@@ -5,16 +5,21 @@ import com.localai.domain.model.DownloadState
 import com.localai.domain.model.ModelInfo
 import com.localai.domain.repository.AIModelRepository
 import dagger.hilt.android.qualifiers.ApplicationContext
-import kotlinx.coroutines.delay
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flow
+import kotlinx.coroutines.flow.flowOn
+import okhttp3.OkHttpClient
+import okhttp3.Request
 import java.io.File
+import java.io.IOException
 import javax.inject.Inject
 import javax.inject.Singleton
 
 @Singleton
 class AIModelRepositoryImpl @Inject constructor(
-    @ApplicationContext private val context: Context
+    @ApplicationContext private val context: Context,
+    private val okHttpClient: OkHttpClient
 ) : AIModelRepository {
 
     private val modelsDir: File
@@ -23,7 +28,6 @@ class AIModelRepositoryImpl @Inject constructor(
     override fun fetchRemoteModels(): Flow<List<ModelInfo>> = flow {
         // TODO: Replace with real Hugging Face API call:
         // val response = hfApiClient.searchGgufModels(query = "GGUF", limit = 20)
-        delay(800)
         emit(
             listOf(
                 ModelInfo(
@@ -60,7 +64,7 @@ class AIModelRepositoryImpl @Inject constructor(
     override fun downloadModel(modelInfo: ModelInfo): Flow<DownloadState> = flow {
         val targetFile = File(modelsDir, modelInfo.ggufFileName)
 
-        // If a real GGUF file already exists (e.g. adb-pushed), skip simulation
+        // If a real GGUF file already exists (e.g. adb-pushed), skip download
         if (targetFile.exists() && targetFile.length() > 4096) {
             emit(DownloadState.Completed(targetFile.absolutePath))
             return@flow
@@ -68,19 +72,62 @@ class AIModelRepositoryImpl @Inject constructor(
 
         emit(DownloadState.InProgress(0f))
 
-        // TODO: Replace with real download logic using OkHttp / Retrofit:
-        // val response = hfApiClient.downloadFile(modelInfo.id, modelInfo.ggufFileName)
-        // val inputStream = response.body()?.byteStream()
-        val totalSteps = 10
-        for (i in 1..totalSteps) {
-            delay(300)
-            val progress = i.toFloat() / totalSteps
-            emit(DownloadState.InProgress(progress))
-        }
+        val tmpFile = File(modelsDir, "${modelInfo.ggufFileName}.tmp")
 
-        targetFile.createNewFile()
-        emit(DownloadState.Completed(targetFile.absolutePath))
-    }
+        try {
+            val url = "https://huggingface.co/${modelInfo.id}/resolve/main/${modelInfo.ggufFileName}"
+
+            val request = Request.Builder()
+                .url(url)
+                .build()
+
+            val response = okHttpClient.newCall(request).execute()
+
+            if (!response.isSuccessful) {
+                tmpFile.delete()
+                emit(DownloadState.Failed("Download failed: HTTP ${response.code}"))
+                return@flow
+            }
+
+            val body = response.body ?: run {
+                tmpFile.delete()
+                emit(DownloadState.Failed("Download failed: empty response body"))
+                return@flow
+            }
+
+            val contentLength = body.contentLength()
+            var bytesRead: Long = 0
+
+            body.byteStream().use { inputStream ->
+                tmpFile.outputStream().use { outputStream ->
+                    val buffer = ByteArray(8192)
+                    var read: Int
+                    while (inputStream.read(buffer).also { read = it } != -1) {
+                        outputStream.write(buffer, 0, read)
+                        bytesRead += read
+                        if (contentLength > 0) {
+                            val progress = bytesRead.toFloat() / contentLength.toFloat()
+                            emit(DownloadState.InProgress(progress.coerceIn(0f, 1f)))
+                        }
+                    }
+                }
+            }
+
+            // Rename tmp file to final file on success
+            if (tmpFile.renameTo(targetFile)) {
+                emit(DownloadState.Completed(targetFile.absolutePath))
+            } else {
+                tmpFile.delete()
+                emit(DownloadState.Failed("Failed to rename downloaded file"))
+            }
+        } catch (e: IOException) {
+            tmpFile.delete()
+            emit(DownloadState.Failed("Download failed: ${e.message ?: "Unknown IO error"}"))
+        } catch (e: Exception) {
+            tmpFile.delete()
+            emit(DownloadState.Failed("Download failed: ${e.message ?: "Unknown error"}"))
+        }
+    }.flowOn(Dispatchers.IO)
 
     override suspend fun getLocalModels(): List<ModelInfo> {
         val files = modelsDir.listFiles() ?: return emptyList()
