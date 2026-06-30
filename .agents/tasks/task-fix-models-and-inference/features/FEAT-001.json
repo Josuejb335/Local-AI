@@ -1,0 +1,33 @@
+{
+  "id": "FEAT-001",
+  "type": "feat",
+  "description": "Replace hardcoded 3-model list with dynamic Hugging Face API call that fetches GGUF models < 3B parameters, fix download URL construction, fix the false completion issue, and add org.json dependency for JSON parsing",
+  "status": "in_progress",
+  "steps": [
+    "Add org.json is already available in Android SDK (android.jar includes org.json.JSONObject/JSONArray), so no dependency needed. Use JSONObject/JSONArray for parsing HF API responses.",
+    "In AIModelRepositoryImpl.kt, replace the hardcoded model list in fetchRemoteModels() with a real HTTP call to the Hugging Face API endpoint: GET https://huggingface.co/api/models?filter=gguf&sort=downloads&direction=-1&limit=50. Parse the JSON response to extract model metadata.",
+    "Filter the API results to only include models that are likely < 3B parameters. The HF API does not directly return parameter count, but we can filter by looking at the model ID / tags. Use a heuristic: include models whose ID or tags contain indicators of small size (0.5B, 1B, 1.5B, 2B, 3B) OR filter by known file sizes (GGUF Q4_K_M for 3B model is roughly < 2GB). A practical approach: after getting models, fetch the file listing for each model from https://huggingface.co/api/models/{model_id} to find GGUF files, and filter by file size < 2GB (Q4_K_M of 3B is about 1.8GB).",
+    "For each model from the API, determine the correct GGUF filename to download. The HF API model detail endpoint (https://huggingface.co/api/models/{model_id}) returns siblings[] with filenames. Look for Q4_K_M .gguf files. If not found, look for Q4_0 or any .gguf file under 2GB.",
+    "Fix the download URL construction. The current URL pattern 'https://huggingface.co/{id}/resolve/main/{ggufFileName}' is correct for most repos. But some repos may use different branch names or paths. Keep the current pattern as it works for standard HF repos.",
+    "Fix the false-completion issue (Issue 2): The current check 'if (targetFile.exists() && targetFile.length() > 4096)' can be fooled by leftover .tmp files that got renamed or partial downloads from crashes. Add a more robust check: also verify the file is not suspiciously small compared to expected size. If modelInfo.fileSizeBytes is known and > 0, check that targetFile.length() >= modelInfo.fileSizeBytes * 0.9 (allow 10% tolerance for different quant). If the file is much smaller than expected, delete it and re-download.",
+    "Handle HTTP redirects properly - OkHttpClient follows redirects by default (followRedirects = true), so this should work. But ensure the download handles 302/303 redirects from HF CDN correctly.",
+    "Add proper error messages that indicate what went wrong (e.g., 'Model requires authentication' for 401, 'File not found' for 404).",
+    "Update ModelInfo data class if needed to support optional fields from the API (some models may not have exact file sizes until we fetch the file listing)."
+  ],
+  "acceptance_criteria": [
+    "fetchRemoteModels() makes a real HTTP call to HF API and returns a dynamic list of GGUF models",
+    "Only models with GGUF files < 2GB (roughly < 3B parameters in Q4 quantization) are shown",
+    "Each model has a valid ggufFileName derived from the actual HF repo file listing",
+    "The download URL pattern correctly resolves for standard HF repos",
+    "The false-completion bug is fixed - files are validated against expected size before being marked as completed",
+    "Error messages are descriptive (404 = file not found, 401 = auth required, etc.)"
+  ],
+  "verification": [
+    "Read the modified AIModelRepositoryImpl.kt and verify it makes HTTP calls to HF API",
+    "Verify the JSON parsing logic correctly extracts model IDs and GGUF filenames",
+    "Verify the file existence check now validates file size against expected size",
+    "Check that the code compiles syntactically (imports, types, etc. are correct)"
+  ],
+  "blocked_reason": null,
+  "findings": ""
+}
