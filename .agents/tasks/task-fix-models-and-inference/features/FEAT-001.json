@@ -2,7 +2,7 @@
   "id": "FEAT-001",
   "type": "feat",
   "description": "Replace hardcoded 3-model list with dynamic Hugging Face API call that fetches GGUF models < 3B parameters, fix download URL construction, fix the false completion issue, and add org.json dependency for JSON parsing",
-  "status": "in_progress",
+  "status": "completed",
   "steps": [
     "Add org.json is already available in Android SDK (android.jar includes org.json.JSONObject/JSONArray), so no dependency needed. Use JSONObject/JSONArray for parsing HF API responses.",
     "In AIModelRepositoryImpl.kt, replace the hardcoded model list in fetchRemoteModels() with a real HTTP call to the Hugging Face API endpoint: GET https://huggingface.co/api/models?filter=gguf&sort=downloads&direction=-1&limit=50. Parse the JSON response to extract model metadata.",
@@ -29,5 +29,5 @@
     "Check that the code compiles syntactically (imports, types, etc. are correct)"
   ],
   "blocked_reason": null,
-  "findings": ""
+  "findings": "Implementation complete. Uses org.json (Android SDK built-in) for parsing HF API responses. Makes individual model detail API calls to get siblings/file sizes since the search endpoint does not include file sizes. Fallback list uses bartowski repos which are known-good public GGUF quantizations. The false-completion fix validates file size >= 90% of expected before marking as complete. Also validates downloaded tmp file size before renaming to final destination. Cannot run Gradle build due to INTEGRATIONS_ONLY network, but code was verified for Kotlin syntax correctness and proper API usage patterns."
 }
