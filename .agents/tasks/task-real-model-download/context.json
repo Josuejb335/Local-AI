@@ -1,0 +1,25 @@
+{
+  "project_type": "Android app (Kotlin, Jetpack Compose, Hilt DI, llama.cpp JNI)",
+  "language": "Kotlin",
+  "build_system": "Gradle with Kotlin DSL (build.gradle.kts). AGP 8.2.2, Kotlin 1.9.22, Hilt 2.50.",
+  "test_framework": "JUnit 4 for unit tests, AndroidJUnit with Compose UI testing for instrumented tests. No tests currently exist.",
+  "build_command": "cd /projects/sandbox/Local-AI && ./gradlew assembleDebug",
+  "test_command": "cd /projects/sandbox/Local-AI && ./gradlew test",
+  "verification_instructions": "Run ./gradlew assembleDebug to confirm the app compiles with the new OkHttp dependency and the real download implementation.",
+  "snapshot_or_generated_files": null,
+  "setup_instructions": "Project uses Gradle wrapper. Run ./gradlew assembleDebug from project root.",
+  "environment_constraints": "Open internet access available. Android project requires Android SDK - Gradle build may or may not succeed in sandbox depending on SDK availability. AST/syntax validation may be needed as fallback.",
+  "contribution_requirements": "None documented.",
+  "key_patterns": "Repository pattern with Hilt DI. AIModelRepositoryImpl implements AIModelRepository interface. Uses Kotlin Flow for async operations. DownloadState sealed class has Idle, InProgress(progress: Float), Completed(localPath: String), Failed(message: String) states. Models directory at context.filesDir/models/. Hugging Face download URL pattern: https://huggingface.co/{model_id}/resolve/main/{ggufFileName}",
+  "relevant_files": [
+    "app/src/main/java/com/localai/data/repository/AIModelRepositoryImpl.kt",
+    "app/src/main/java/com/localai/domain/model/ModelInfo.kt",
+    "app/src/main/java/com/localai/domain/model/DownloadState.kt",
+    "app/src/main/java/com/localai/domain/repository/AIModelRepository.kt",
+    "app/src/main/java/com/localai/di/EngineModule.kt",
+    "app/src/main/java/com/localai/presentation/model/ModelManagerViewModel.kt",
+    "app/build.gradle.kts",
+    "app/src/main/AndroidManifest.xml"
+  ],
+  "directory_structure": "Standard Android project: app/src/main/java/com/localai/ with packages: data/repository, data/engine, domain/model, domain/repository, domain/engine, presentation/model, presentation/chat, di. build.gradle.kts at app/ level. AndroidManifest.xml at app/src/main/."
+}
