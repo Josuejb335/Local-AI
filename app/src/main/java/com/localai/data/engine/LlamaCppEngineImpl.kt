@@ -72,6 +72,9 @@ class LlamaCppEngineImpl @Inject constructor() : AIModelEngine {
     }
 
     private fun nativeGenerate(messages: List<ChatMessage>): Flow<String> = flow {
+        // NOTE: Prompt template heuristic is filename-based. Models like TinyLlama that use
+        // ChatML despite having "llama" in the name will get the wrong template. A proper fix
+        // would require reading the GGUF metadata tokenizer.chat_template key via native layer.
         val template = if (loadedLocalPath.contains("llama", ignoreCase = true))
             PromptTemplate.LLAMA_3 else PromptTemplate.CHATML
 

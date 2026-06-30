@@ -31,8 +31,9 @@ class AIModelRepositoryImpl @Inject constructor(
 
     companion object {
         private const val TAG = "AIModelRepository"
+        // Use expand[]=siblings to inline file metadata in search results (avoids N+1 API calls)
         private const val HF_API_URL =
-            "https://huggingface.co/api/models?filter=gguf&sort=downloads&direction=-1&limit=50"
+            "https://huggingface.co/api/models?filter=gguf&sort=downloads&direction=-1&limit=50&expand[]=siblings"
         private const val MAX_FILE_SIZE_BYTES = 2_000_000_000L // 2GB cap for < 3B models
         private val PREFERRED_QUANT_PATTERNS = listOf(
             "q4_k_m", "q4_k_s", "q4_0", "q4_1", "q5_k_m", "q5_k_s"
@@ -74,37 +75,50 @@ class AIModelRepositoryImpl @Inject constructor(
             val result = mutableListOf<ModelInfo>()
 
             for (i in 0 until modelsArray.length()) {
-                val modelObj = modelsArray.getJSONObject(i)
-                val modelId = modelObj.optString("id", "")
-                if (modelId.isEmpty()) continue
-                val author = modelObj.optString("author", modelId.substringBefore("/"))
-                val downloads = modelObj.optLong("downloads", 0)
+                // Wrap per-model processing in try/catch so one bad model
+                // does not discard already-parsed partial results
+                try {
+                    val modelObj = modelsArray.getJSONObject(i)
+                    val modelId = modelObj.optString("id", "")
+                    if (modelId.isEmpty()) continue
+                    val author = modelObj.optString("author", modelId.substringBefore("/"))
+                    val downloads = modelObj.optLong("downloads", 0)
 
-                // Try to get GGUF file info from the model detail endpoint
-                val modelDetail = fetchModelDetail(modelId) ?: continue
-                val ggufFile = findBestGgufFile(modelDetail) ?: continue
+                    // The search response includes siblings via expand[]=siblings.
+                    // Use it directly; fall back to detail endpoint only if missing.
+                    val modelData = if (modelObj.has("siblings")) {
+                        modelObj
+                    } else {
+                        fetchModelDetail(modelId) ?: continue
+                    }
 
-                val fileName = ggufFile.first
-                val fileSize = ggufFile.second
+                    val ggufFile = findBestGgufFile(modelData) ?: continue
 
-                // Skip if file is too large (> 2GB means likely > 3B params)
-                if (fileSize > MAX_FILE_SIZE_BYTES) continue
+                    val fileName = ggufFile.first
+                    val fileSize = ggufFile.second
 
-                val modelName = modelId.substringAfter("/")
-                    .replace("-GGUF", "")
-                    .replace("-gguf", "")
+                    // Skip if file has a known size that exceeds 2GB (likely > 3B params)
+                    if (fileSize > MAX_FILE_SIZE_BYTES) continue
 
-                result.add(
-                    ModelInfo(
-                        id = modelId,
-                        author = author,
-                        name = modelName,
-                        description = formatDescription(fileSize, downloads),
-                        downloads = downloads,
-                        fileSizeBytes = fileSize,
-                        ggufFileName = fileName
+                    val modelName = modelId.substringAfter("/")
+                        .replace("-GGUF", "")
+                        .replace("-gguf", "")
+
+                    result.add(
+                        ModelInfo(
+                            id = modelId,
+                            author = author,
+                            name = modelName,
+                            description = formatDescription(fileSize, downloads),
+                            downloads = downloads,
+                            fileSizeBytes = fileSize,
+                            ggufFileName = fileName
+                        )
                     )
-                )
+                } catch (e: Exception) {
+                    Log.w(TAG, "Failed to parse model at index $i, skipping", e)
+                    continue
+                }
             }
 
             // Sort by downloads descending and return
@@ -136,34 +150,53 @@ class AIModelRepositoryImpl @Inject constructor(
         val siblings = modelDetail.optJSONArray("siblings") ?: return null
 
         // Collect all .gguf files with their sizes
-        val ggufFiles = mutableListOf<Pair<String, Long>>()
+        // Files with known size <= MAX are preferred; files with unknown size (0) are kept
+        // as lower-priority candidates
+        val ggufFilesWithKnownSize = mutableListOf<Pair<String, Long>>()
+        val ggufFilesWithUnknownSize = mutableListOf<Pair<String, Long>>()
+
         for (i in 0 until siblings.length()) {
             val sibling = siblings.getJSONObject(i)
             val filename = sibling.optString("rfilename", "")
             if (filename.endsWith(".gguf", ignoreCase = true)) {
                 val size = sibling.optLong("size", 0)
-                if (size > 0 && size <= MAX_FILE_SIZE_BYTES) {
-                    ggufFiles.add(filename to size)
+                when {
+                    size > MAX_FILE_SIZE_BYTES -> { /* skip files known to be too large */ }
+                    size > 0 -> ggufFilesWithKnownSize.add(filename to size)
+                    else -> ggufFilesWithUnknownSize.add(filename to 0L)
                 }
             }
         }
 
-        if (ggufFiles.isEmpty()) return null
+        // Prefer files with known size first, then fall back to unknown-size files
+        val candidates = if (ggufFilesWithKnownSize.isNotEmpty()) {
+            ggufFilesWithKnownSize
+        } else if (ggufFilesWithUnknownSize.isNotEmpty()) {
+            ggufFilesWithUnknownSize
+        } else {
+            return null
+        }
 
         // Prefer Q4_K_M quantization, then Q4_K_S, then Q4_0, etc.
         for (quantPattern in PREFERRED_QUANT_PATTERNS) {
-            val match = ggufFiles.find { (name, _) ->
+            val match = candidates.find { (name, _) ->
                 name.lowercase().contains(quantPattern)
             }
             if (match != null) return match
         }
 
-        // If no preferred quantization found, return the smallest GGUF file
-        return ggufFiles.minByOrNull { it.second }
+        // If no preferred quantization found, return the smallest known-size file
+        // or the first unknown-size file
+        return if (ggufFilesWithKnownSize.isNotEmpty()) {
+            ggufFilesWithKnownSize.minByOrNull { it.second }
+        } else {
+            ggufFilesWithUnknownSize.firstOrNull()
+        }
     }
 
     private fun formatDescription(fileSize: Long, downloads: Long): String {
         val sizeStr = when {
+            fileSize <= 0 -> "Unknown size"
             fileSize >= 1_000_000_000 -> "%.1f GB".format(fileSize / 1_000_000_000.0)
             fileSize >= 1_000_000 -> "%.0f MB".format(fileSize / 1_000_000.0)
             else -> "%.0f KB".format(fileSize / 1_000.0)
