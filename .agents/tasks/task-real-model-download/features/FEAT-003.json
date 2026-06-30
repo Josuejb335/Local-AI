@@ -1,0 +1,22 @@
+{
+  "id": "FEAT-003",
+  "type": "fix",
+  "description": "Fix CancellationException being swallowed by generic catch block, and dispose invokeOnCompletion handle after download completes to prevent holding reference to call.",
+  "status": "completed",
+  "steps": [
+    "Add import for kotlinx.coroutines.CancellationException",
+    "Add catch (e: CancellationException) block BEFORE the generic catch (e: Exception) block that deletes tmpFile and rethrows",
+    "Store DisposableHandle from invokeOnCompletion and dispose it in a finally block after the download logic"
+  ],
+  "acceptance_criteria": [
+    "CancellationException is caught before generic Exception, tmpFile is deleted, and the exception is rethrown",
+    "invokeOnCompletion handle is disposed after download completes (success or failure)",
+    "Import for kotlinx.coroutines.CancellationException is present",
+    "Code compiles without errors"
+  ],
+  "verification": [
+    "Run ./gradlew assembleDebug (or verify Kotlin syntax correctness if SDK unavailable)"
+  ],
+  "blocked_reason": null,
+  "findings": "Gradle build cannot run due to network timeout downloading Gradle distribution (same as FEAT-001/FEAT-002). Code verified via manual review - uses standard Kotlin/kotlinx.coroutines patterns (CancellationException, DisposableHandle.dispose()). The nested try/finally correctly scopes handle disposal while the outer try/catch handles CancellationException before the generic Exception catch."
+}

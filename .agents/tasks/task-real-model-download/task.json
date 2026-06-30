@@ -1,0 +1,14 @@
+{
+  "task_id": "task-real-model-download",
+  "task_description": "Replace the mock/simulated model download in AIModelRepositoryImpl with a real HTTP download from Hugging Face using OkHttp, so that actual GGUF model files are downloaded and the chat feature works.",
+  "status": "completed",
+  "feature_order": ["FEAT-001"],
+  "blocked_reason": null,
+  "verification": {
+    "build": "skipped",
+    "tests": "skipped",
+    "test_quality": "skipped",
+    "docker_build": "skipped",
+    "summary": "Gradle build could not execute due to network timeout downloading Gradle distribution (services.gradle.org unreachable from sandbox). No Kotlin compiler available for standalone syntax check. Code verified via manual review: all imports, types, method signatures, and Hilt DI annotations are correct and consistent with the existing codebase patterns."
+  }
+}

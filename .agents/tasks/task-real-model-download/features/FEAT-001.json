@@ -1,0 +1,30 @@
+{
+  "id": "FEAT-001",
+  "type": "fix",
+  "description": "Replace the mock/simulated model download in AIModelRepositoryImpl with a real HTTP download from Hugging Face using OkHttp. Add OkHttp dependency, INTERNET permission, and implement streaming download with progress reporting.",
+  "status": "completed",
+  "steps": [
+    "Add OkHttp dependency to app/build.gradle.kts: implementation(\"com.squareup.okhttp3:okhttp:4.12.0\")",
+    "Add INTERNET and ACCESS_NETWORK_STATE permissions to app/src/main/AndroidManifest.xml before the <application> tag",
+    "Rewrite the downloadModel() function in app/src/main/java/com/localai/data/repository/AIModelRepositoryImpl.kt to: (a) construct the Hugging Face download URL as https://huggingface.co/{modelInfo.id}/resolve/main/{modelInfo.ggufFileName}, (b) use OkHttp to make a GET request, (c) stream the response body to a temporary file (e.g. targetFile.gguf.tmp) with progress emissions based on bytes read vs Content-Length, (d) rename the tmp file to the final targetFile on success, (e) delete the tmp file on failure, (f) emit DownloadState.Failed on any exception (IOException, etc.)",
+    "Keep the existing early-return guard: if (targetFile.exists() && targetFile.length() > 4096) emit Completed and return",
+    "Inject OkHttpClient via Hilt constructor injection into AIModelRepositoryImpl, or create it locally. If injecting via Hilt, add an @Provides function in a new or existing Hilt module (e.g. app/src/main/java/com/localai/di/NetworkModule.kt) that provides a singleton OkHttpClient with appropriate timeouts for large file downloads (e.g. 30s connect, 5min read/write)",
+    "Ensure the Flow uses Dispatchers.IO for the network/disk operations (use flowOn(Dispatchers.IO) at the end of the flow builder)",
+    "Remove the old 'delay(300)' simulation loop and the 'import kotlinx.coroutines.delay' if no longer needed"
+  ],
+  "acceptance_criteria": [
+    "app/build.gradle.kts contains OkHttp dependency",
+    "AndroidManifest.xml contains INTERNET permission",
+    "AIModelRepositoryImpl.downloadModel() makes a real HTTP GET request to Hugging Face URL",
+    "Download streams to a .tmp file first, then renames on success",
+    "Progress is reported as bytes_downloaded / content_length",
+    "Errors are caught and emitted as DownloadState.Failed with a descriptive message",
+    "The existing early-return guard for already-downloaded files is preserved",
+    "Code compiles without errors (verified by Gradle build or syntax check)"
+  ],
+  "verification": [
+    "Run ./gradlew assembleDebug (or if Android SDK not available, verify Kotlin syntax correctness of modified files)"
+  ],
+  "blocked_reason": null,
+  "findings": "Gradle build could not run in sandbox due to network timeout downloading Gradle distribution from services.gradle.org. Code verified via manual syntax review against domain model types (ModelInfo, DownloadState, AIModelRepository interface). All imports, types, and method signatures are correct. The delay(800) in fetchRemoteModels was also removed since the delay import was removed and it was only simulating latency for mock data."
+}
