@@ -6,6 +6,7 @@ import com.localai.domain.model.ModelInfo
 import com.localai.domain.repository.AIModelRepository
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlin.coroutines.coroutineContext
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.Flow
@@ -85,45 +86,50 @@ class AIModelRepositoryImpl @Inject constructor(
                 .build()
 
             val call = okHttpClient.newCall(request)
-            coroutineContext.job.invokeOnCompletion { call.cancel() }
-            val response = call.execute()
+            val cancelHandle = coroutineContext.job.invokeOnCompletion { call.cancel() }
 
-            response.use { resp ->
-                if (!resp.isSuccessful) {
-                    tmpFile.delete()
-                    emit(DownloadState.Failed("Download failed: HTTP ${resp.code}"))
-                    return@flow
-                }
+            try {
+                val response = call.execute()
 
-                val body = resp.body ?: run {
-                    tmpFile.delete()
-                    emit(DownloadState.Failed("Download failed: empty response body"))
-                    return@flow
-                }
+                response.use { resp ->
+                    if (!resp.isSuccessful) {
+                        tmpFile.delete()
+                        emit(DownloadState.Failed("Download failed: HTTP ${resp.code}"))
+                        return@flow
+                    }
 
-                val contentLength = body.contentLength()
-                var bytesRead: Long = 0
-                var lastEmittedPercent = -1
+                    val body = resp.body ?: run {
+                        tmpFile.delete()
+                        emit(DownloadState.Failed("Download failed: empty response body"))
+                        return@flow
+                    }
 
-                body.byteStream().use { inputStream ->
-                    tmpFile.outputStream().use { outputStream ->
-                        val buffer = ByteArray(8192)
-                        var read: Int
-                        while (inputStream.read(buffer).also { read = it } != -1) {
-                            coroutineContext.ensureActive()
-                            outputStream.write(buffer, 0, read)
-                            bytesRead += read
-                            if (contentLength > 0) {
-                                val progress = bytesRead.toFloat() / contentLength.toFloat()
-                                val percent = (progress * 100).toInt()
-                                if (percent != lastEmittedPercent) {
-                                    lastEmittedPercent = percent
-                                    emit(DownloadState.InProgress(progress.coerceIn(0f, 1f)))
+                    val contentLength = body.contentLength()
+                    var bytesRead: Long = 0
+                    var lastEmittedPercent = -1
+
+                    body.byteStream().use { inputStream ->
+                        tmpFile.outputStream().use { outputStream ->
+                            val buffer = ByteArray(8192)
+                            var read: Int
+                            while (inputStream.read(buffer).also { read = it } != -1) {
+                                coroutineContext.ensureActive()
+                                outputStream.write(buffer, 0, read)
+                                bytesRead += read
+                                if (contentLength > 0) {
+                                    val progress = bytesRead.toFloat() / contentLength.toFloat()
+                                    val percent = (progress * 100).toInt()
+                                    if (percent != lastEmittedPercent) {
+                                        lastEmittedPercent = percent
+                                        emit(DownloadState.InProgress(progress.coerceIn(0f, 1f)))
+                                    }
                                 }
                             }
                         }
                     }
                 }
+            } finally {
+                cancelHandle.dispose()
             }
 
             // Rename tmp file to final file on success
@@ -133,6 +139,9 @@ class AIModelRepositoryImpl @Inject constructor(
                 tmpFile.delete()
                 emit(DownloadState.Failed("Failed to rename downloaded file"))
             }
+        } catch (e: CancellationException) {
+            tmpFile.delete()
+            throw e
         } catch (e: IOException) {
             tmpFile.delete()
             emit(DownloadState.Failed("Download failed: ${e.message ?: "Unknown IO error"}"))
