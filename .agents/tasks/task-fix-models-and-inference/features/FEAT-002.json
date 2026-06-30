@@ -2,7 +2,7 @@
   "id": "FEAT-002",
   "type": "fix",
   "description": "Remove mock inference fallback from LlamaCppEngineImpl and fail clearly when native libraries are not available. Also clean up broken symlinks in JniLibs (uppercase) directory that may confuse the build.",
-  "status": "pending",
+  "status": "in_progress",
   "steps": [
     "In LlamaCppEngineImpl.kt, remove the fallbackInit() method and the mockGenerate() method entirely.",
     "In the initialize() method, when LlamaCppJniBridge.nativeLoaded is false, return Result.failure() with a clear error message like 'Native inference engine not available on this device. The required native libraries (libllama.so) could not be loaded for this device architecture.'",
