@@ -67,6 +67,27 @@ for ABI in "${ABIS[@]}"; do
         fi
     done
 
+    # Copy libomp.so from the NDK (required by libggml-base.so and libggml-cpu.so)
+    # The NDK ships OpenMP at: toolchains/llvm/prebuilt/<host>/lib/clang/<ver>/lib/linux/<arch>/libomp.so
+    case "$ABI" in
+        arm64-v8a) OMP_ARCH="aarch64" ;;
+        armeabi-v7a) OMP_ARCH="arm" ;;
+        x86_64) OMP_ARCH="x86_64" ;;
+        x86) OMP_ARCH="i386" ;;
+        *) OMP_ARCH="" ;;
+    esac
+    if [ -n "$OMP_ARCH" ]; then
+        OMP_SO=$(find "$NDK_PATH/toolchains/llvm/prebuilt" -path "*/lib/linux/$OMP_ARCH/libomp.so" 2>/dev/null | head -1)
+        if [ -n "$OMP_SO" ] && [ -f "$OMP_SO" ]; then
+            cp "$OMP_SO" "$OUT_ABI/libomp.so"
+            echo "  ✓ Copied libomp.so from NDK for $ABI"
+        else
+            echo "  ⚠ WARNING: libomp.so not found in NDK for $OMP_ARCH."
+            echo "    libggml-base.so and libggml-cpu.so depend on OpenMP."
+            echo "    Searched: $NDK_PATH/toolchains/llvm/prebuilt/*/lib/clang/*/lib/linux/$OMP_ARCH/libomp.so"
+        fi
+    fi
+
     echo "✓ $OUT_ABI/libllama.so"
 done
 
