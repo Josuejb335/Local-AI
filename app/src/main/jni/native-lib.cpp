@@ -1,7 +1,10 @@
 #include <jni.h>
 #include "llama.h"
+#include <algorithm>
 #include <cstring>
 #include <new>
+#include <string>
+#include <thread>
 #include <vector>
 
 struct NativeContext {
@@ -14,10 +17,13 @@ struct NativeContext {
     int               step       = 0;
 };
 
-static llama_sampler * make_greedy_sampler() {
+static llama_sampler * make_default_sampler() {
     auto sparams = llama_sampler_chain_default_params();
     llama_sampler * s = llama_sampler_chain_init(sparams);
-    llama_sampler_chain_add(s, llama_sampler_init_greedy());
+    llama_sampler_chain_add(s, llama_sampler_init_top_k(40));
+    llama_sampler_chain_add(s, llama_sampler_init_top_p(0.9f, 1));
+    llama_sampler_chain_add(s, llama_sampler_init_temp(0.7f));
+    llama_sampler_chain_add(s, llama_sampler_init_dist(0));
     return s;
 }
 
@@ -38,9 +44,10 @@ Java_com_localai_data_network_LlamaCppJniBridge_loadModelNative(
     if (!model) return 0;
 
     llama_context_params c_params = llama_context_default_params();
-    c_params.n_ctx     = 2048;
-    c_params.n_threads = 4;
-    c_params.n_batch   = 512;
+    c_params.n_ctx = 2048;
+    const unsigned int hw_threads = std::thread::hardware_concurrency();
+    c_params.n_threads = (int32_t) std::clamp(hw_threads > 0 ? hw_threads - 1 : 2u, 1u, 6u);
+    c_params.n_batch = 128;
 
     llama_context *ctx = llama_init_from_model(model, c_params);
     if (!ctx) {
@@ -55,7 +62,7 @@ Java_com_localai_data_network_LlamaCppJniBridge_loadModelNative(
         return 0;
     }
     nc->vocab = llama_model_get_vocab(model);
-    nc->smpl  = make_greedy_sampler();
+    nc->smpl  = make_default_sampler();
 
     return reinterpret_cast<jlong>(nc);
 }
@@ -103,7 +110,7 @@ Java_com_localai_data_network_LlamaCppJniBridge_generateStreamingTokenNative(
 
         int n_tokens = llama_tokenize(
             nc->vocab, prompt_str, std::strlen(prompt_str),
-            nullptr, 0, true, false);
+            nullptr, 0, true, true);
         if (n_tokens <= 0) {
             env->ReleaseStringUTFChars(prompt, prompt_str);
             return nullptr;
@@ -112,7 +119,7 @@ Java_com_localai_data_network_LlamaCppJniBridge_generateStreamingTokenNative(
         std::vector<llama_token> tokens(static_cast<size_t>(n_tokens));
         llama_tokenize(
             nc->vocab, prompt_str, std::strlen(prompt_str),
-            tokens.data(), tokens.size(), true, false);
+            tokens.data(), tokens.size(), true, true);
 
         env->ReleaseStringUTFChars(prompt, prompt_str);
 
@@ -153,11 +160,17 @@ Java_com_localai_data_network_LlamaCppJniBridge_generateStreamingTokenNative(
         return nullptr;
     }
 
-    // detokenize
-    char piece[16];
-    int len = llama_token_to_piece(nc->vocab, new_token_id, piece, (int)sizeof(piece), 0, true);
-    if (len < 0) len = 0;
-    piece[len] = '\0';
+    // detokenize with a growable buffer (fixed tiny buffers can overflow/corrupt output)
+    std::vector<char> piece_buf(64);
+    int len = llama_token_to_piece(nc->vocab, new_token_id, piece_buf.data(), (int32_t) piece_buf.size(), 0, true);
+    if (len < 0) {
+        piece_buf.resize((size_t) -len);
+        len = llama_token_to_piece(nc->vocab, new_token_id, piece_buf.data(), (int32_t) piece_buf.size(), 0, true);
+    }
+    std::string piece;
+    if (len > 0) {
+        piece.assign(piece_buf.data(), (size_t) len);
+    }
 
     // feed token back
     {
@@ -178,5 +191,5 @@ Java_com_localai_data_network_LlamaCppJniBridge_generateStreamingTokenNative(
     }
     nc->step++;
 
-    return env->NewStringUTF(piece);
+    return env->NewStringUTF(piece.c_str());
 }

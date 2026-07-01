@@ -45,14 +45,16 @@ class ChatViewModel @Inject constructor(
     }
 
     fun sendMessage() {
-        val input = _uiState.value.currentInput.trim()
-        if (input.isEmpty() || _uiState.value.isGenerating || !_uiState.value.isModelLoaded) return
+        val stateBeforeSend = _uiState.value
+        val input = stateBeforeSend.currentInput.trim()
+        if (input.isEmpty() || stateBeforeSend.isGenerating || !stateBeforeSend.isModelLoaded) return
 
         val userMessage = ChatMessage(
             id = UUID.randomUUID().toString(),
             role = MessageRole.USER,
             content = input
         )
+        val inferenceMessages = stateBeforeSend.messages + userMessage
 
         val assistantMessageId = UUID.randomUUID().toString()
         currentAssistantMessage = ""
@@ -72,7 +74,7 @@ class ChatViewModel @Inject constructor(
 
         viewModelScope.launch {
             try {
-                aiModelEngine.generate(uiState.value.messages).collect { token ->
+                aiModelEngine.generate(inferenceMessages).collect { token ->
                     currentAssistantMessage += token
                     _uiState.update { state ->
                         val msgs = state.messages.toMutableList()
@@ -92,7 +94,22 @@ class ChatViewModel @Inject constructor(
                     state.copy(messages = msgs, error = e.message)
                 }
             } finally {
-                _uiState.update { it.copy(isGenerating = false) }
+                _uiState.update { state ->
+                    val msgs = state.messages.toMutableList()
+                    val hasEmptyAssistant = msgs.lastOrNull()?.let {
+                        it.role == MessageRole.ASSISTANT && it.content.isEmpty()
+                    } == true
+                    if (hasEmptyAssistant) {
+                        msgs.removeAt(msgs.lastIndex)
+                        state.copy(
+                            messages = msgs,
+                            isGenerating = false,
+                            error = state.error ?: "Model returned no text. Try a different model or prompt."
+                        )
+                    } else {
+                        state.copy(isGenerating = false)
+                    }
+                }
             }
         }
     }

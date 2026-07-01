@@ -1,6 +1,14 @@
 cmake_minimum_required(VERSION 3.22)
 project(llama_jni C CXX)
 
+# Android 15+ requires 16 KB page-size compatibility for native binaries.
+if(ANDROID)
+    add_link_options(
+        "-Wl,-z,max-page-size=16384"
+        "-Wl,-z,common-page-size=16384"
+    )
+endif()
+
 # llama.cpp directory — override with -DLLAMA_CPP_DIR=/path on command line
 if(NOT DEFINED LLAMA_CPP_DIR)
     set(LLAMA_CPP_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../../../../../../llama.cpp")

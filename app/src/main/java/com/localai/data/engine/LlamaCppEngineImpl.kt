@@ -23,14 +23,18 @@ class LlamaCppEngineImpl @Inject constructor() : AIModelEngine {
     private var isInitialized = false
 
     override suspend fun initialize(localPath: String): Result<Unit> = withContext(Dispatchers.IO) {
+        if (isInitialized && nativeContextPtr != 0L) {
+            release()
+        }
         loadedLocalPath = localPath
         if (!LlamaCppJniBridge.nativeLoaded) {
             Log.e(TAG, "Native libraries not loaded for this device architecture")
+            val detail = LlamaCppJniBridge.lastLoadError?.let { " Details: $it" } ?: ""
             return@withContext Result.failure(
                 Exception(
                     "Native inference engine not available. The required native libraries " +
                     "(libllama.so) could not be loaded for this device architecture. " +
-                    "Please ensure the app was built with native libraries for your device."
+                    "Please ensure the app was built with native libraries for your device." + detail
                 )
             )
         }
@@ -72,33 +76,67 @@ class LlamaCppEngineImpl @Inject constructor() : AIModelEngine {
     }
 
     private fun nativeGenerate(messages: List<ChatMessage>): Flow<String> = flow {
-        // NOTE: Prompt template heuristic is filename-based. Models like TinyLlama that use
-        // ChatML despite having "llama" in the name will get the wrong template. A proper fix
-        // would require reading the GGUF metadata tokenizer.chat_template key via native layer.
-        val template = if (loadedLocalPath.contains("llama", ignoreCase = true))
-            PromptTemplate.LLAMA_3 else PromptTemplate.CHATML
+        val templates = templateCandidatesForModel(loadedLocalPath)
+        for (template in templates) {
+            val prompt = PromptFormatter.format(
+                messages = messages,
+                template = template,
+                maxContextTokens = MAX_CONTEXT_TOKENS
+            )
 
-        val prompt = PromptFormatter.format(
-            messages = messages,
-            template = template,
-            maxContextTokens = 2048
-        )
+            Log.d(
+                TAG,
+                "Trying template=${template.label} prompt=${prompt.length} chars (~${PromptFormatter.estimateTokenCount(prompt)} tokens)"
+            )
 
-        Log.d(TAG, "Prompt: ${prompt.length} chars, ~${PromptFormatter.estimateTokenCount(prompt)} tokens")
+            var hasVisibleOutput = false
+            val pendingOutput = StringBuilder()
 
-        // First token: start generation with the prompt
-        var token = withContext(Dispatchers.IO) {
-            LlamaCppJniBridge.generateStreamingTokenNative(nativeContextPtr, prompt)
-        }
-
-        // Subsequent tokens: continue generation (null prompt)
-        while (token != null) {
-            emit(token)
-            if (!currentCoroutineContext().isActive) break
-            token = withContext(Dispatchers.IO) {
-                LlamaCppJniBridge.generateStreamingTokenNative(nativeContextPtr, null)
+            // First token: start generation with the prompt
+            var token = withContext(Dispatchers.IO) {
+                LlamaCppJniBridge.generateStreamingTokenNative(nativeContextPtr, prompt)
             }
+
+            // Subsequent tokens: continue generation (null prompt)
+            while (token != null) {
+                if (token.isNotEmpty()) {
+                    if (!hasVisibleOutput) {
+                        pendingOutput.append(token)
+                    } else {
+                        emit(token)
+                    }
+                    if (!hasVisibleOutput && pendingOutput.any { !it.isWhitespace() }) {
+                        hasVisibleOutput = true
+                        emit(pendingOutput.toString())
+                        pendingOutput.clear()
+                    }
+                }
+                if (!currentCoroutineContext().isActive) break
+                token = withContext(Dispatchers.IO) {
+                    LlamaCppJniBridge.generateStreamingTokenNative(nativeContextPtr, null)
+                }
+            }
+
+            if (hasVisibleOutput) {
+                return@flow
+            }
+
+            Log.w(TAG, "Template ${template.label} produced empty output, trying fallback")
         }
+
+        throw IllegalStateException(
+            "Model produced no visible output. This usually means the chat template does not match the model."
+        )
+    }
+
+    private fun templateCandidatesForModel(modelPath: String): List<PromptTemplate> {
+        val name = modelPath.substringAfterLast('/').lowercase()
+        val first = when {
+            "llama-3" in name || "llama3" in name -> PromptTemplate.LLAMA_3
+            "qwen" in name || "smol" in name || "mistral" in name || "zephyr" in name || "chatml" in name -> PromptTemplate.CHATML
+            else -> PromptTemplate.CHATML
+        }
+        return listOf(first, PromptTemplate.CHATML, PromptTemplate.LLAMA_3, PromptTemplate.RAW).distinct()
     }
 
     override suspend fun release(): Unit = withContext(Dispatchers.IO) {
@@ -117,5 +155,6 @@ class LlamaCppEngineImpl @Inject constructor() : AIModelEngine {
 
     companion object {
         private const val TAG = "LlamaCpp"
+        private const val MAX_CONTEXT_TOKENS = 2048
     }
 }

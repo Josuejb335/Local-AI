@@ -555,7 +555,7 @@ public final class DaggerLocalAiApplication_HiltComponents_SingletonC {
     }
 
     @Override
-    public void injectLocalAiApplication(LocalAiApplication localAiApplication) {
+    public void injectLocalAiApplication(LocalAiApplication arg0) {
     }
 
     @Override

@@ -18,6 +18,39 @@ CMAKE_TOOLCHAIN="$NDK_PATH/build/cmake/android.toolchain.cmake"
 
 ABIS=("x86_64" "arm64-v8a")
 
+expected_machine() {
+    case "$1" in
+        arm64-v8a) echo "ARM aarch64" ;;
+        armeabi-v7a) echo "ARM" ;;
+        x86_64) echo "x86-64" ;;
+        x86) echo "Intel 80386" ;;
+        *) echo "" ;;
+    esac
+}
+
+verify_android_abi_binary() {
+    local so_path="$1"
+    local abi="$2"
+    local expected
+    expected="$(expected_machine "$abi")"
+    if [ ! -f "$so_path" ]; then
+        echo "ERROR: Missing expected binary: $so_path"
+        exit 1
+    fi
+    local info
+    info="$(file "$so_path")"
+    if ! echo "$info" | grep -q "for Android"; then
+        echo "ERROR: $so_path is not an Android binary."
+        echo "  file output: $info"
+        exit 1
+    fi
+    if [ -n "$expected" ] && ! echo "$info" | grep -q "$expected"; then
+        echo "ERROR: $so_path does not match ABI $abi."
+        echo "  file output: $info"
+        exit 1
+    fi
+}
+
 # ---------------------------------------------------------------------------
 # checks
 # ---------------------------------------------------------------------------
@@ -53,13 +86,19 @@ for ABI in "${ABIS[@]}"; do
           -DLLAMA_CUDA=OFF \
           -DLLAMA_METAL=OFF \
           -DLLAMA_VULKAN=OFF \
+          -DGGML_OPENMP=OFF \
           -DLLAMA_CPP_DIR="$LLAMA_CPP_DIR" \
           -G "Unix Makefiles"
 
     cmake --build "$BUILD_DIR" --target llama -j "$(nproc)"
 
     OUT_ABI="$OUTPUT_DIR/$ABI"
+    rm -rf "$OUT_ABI"
     mkdir -p "$OUT_ABI"
+    verify_android_abi_binary "$BUILD_DIR/bin/libllama.so" "$ABI"
+    verify_android_abi_binary "$BUILD_DIR/bin/libggml-base.so" "$ABI"
+    verify_android_abi_binary "$BUILD_DIR/bin/libggml-cpu.so" "$ABI"
+    verify_android_abi_binary "$BUILD_DIR/bin/libggml.so" "$ABI"
     cp "$BUILD_DIR/bin/libllama.so" "$OUT_ABI/libllama.so"
     for dep in libggml-base.so libggml-cpu.so libggml.so; do
         if [ -f "$BUILD_DIR/bin/$dep" ]; then
@@ -67,25 +106,9 @@ for ABI in "${ABIS[@]}"; do
         fi
     done
 
-    # Copy libomp.so from the NDK (required by libggml-base.so and libggml-cpu.so)
-    # The NDK ships OpenMP at: toolchains/llvm/prebuilt/<host>/lib/clang/<ver>/lib/linux/<arch>/libomp.so
-    case "$ABI" in
-        arm64-v8a) OMP_ARCH="aarch64" ;;
-        armeabi-v7a) OMP_ARCH="arm" ;;
-        x86_64) OMP_ARCH="x86_64" ;;
-        x86) OMP_ARCH="i386" ;;
-        *) OMP_ARCH="" ;;
-    esac
-    if [ -n "$OMP_ARCH" ]; then
-        OMP_SO=$(find "$NDK_PATH/toolchains/llvm/prebuilt" -path "*/lib/linux/$OMP_ARCH/libomp.so" 2>/dev/null | head -1)
-        if [ -n "$OMP_SO" ] && [ -f "$OMP_SO" ]; then
-            cp "$OMP_SO" "$OUT_ABI/libomp.so"
-            echo "  ✓ Copied libomp.so from NDK for $ABI"
-        else
-            echo "  ⚠ WARNING: libomp.so not found in NDK for $OMP_ARCH."
-            echo "    libggml-base.so and libggml-cpu.so depend on OpenMP."
-            echo "    Searched: $NDK_PATH/toolchains/llvm/prebuilt/*/lib/clang/*/lib/linux/$OMP_ARCH/libomp.so"
-        fi
+    if readelf -d "$OUT_ABI/libggml-base.so" | grep -q "Shared library: \\[libomp.so\\]"; then
+        echo "ERROR: libggml-base.so still links to libomp.so for $ABI (GGML_OPENMP should be OFF)."
+        exit 1
     fi
 
     echo "✓ $OUT_ABI/libllama.so"

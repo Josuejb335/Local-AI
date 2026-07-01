@@ -1,5 +1,6 @@
 package com.localai.data.network
 
+import android.os.Build
 import android.util.Log
 
 object LlamaCppJniBridge {
@@ -7,16 +8,19 @@ object LlamaCppJniBridge {
     private const val TAG = "JniBridge"
     internal var nativeLoaded = false
         private set
+    internal var lastLoadError: String? = null
+        private set
 
     init {
-        // Load in dependency order: omp → ggml-base → ggml-cpu → ggml → llama
-        // libomp.so (OpenMP) is required by libggml-base.so and libggml-cpu.so
+        // Load in dependency order: ggml-base → ggml-cpu → ggml → llama
         var allLoaded = true
-        for (lib in listOf("omp", "ggml-base", "ggml-cpu", "ggml", "llama")) {
+        lastLoadError = null
+        for (lib in listOf("ggml-base", "ggml-cpu", "ggml", "llama")) {
             try {
                 System.loadLibrary(lib)
             } catch (e: UnsatisfiedLinkError) {
                 Log.w(TAG, "Failed to load $lib", e)
+                lastLoadError = "loadLibrary($lib) failed on ABIs ${Build.SUPPORTED_ABIS.joinToString()}: ${e.message}"
                 allLoaded = false
                 break
             }
