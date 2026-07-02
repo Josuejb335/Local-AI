@@ -3,6 +3,7 @@ package com.localai.presentation.chat
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.localai.domain.engine.AIModelEngine
+import com.localai.domain.engine.GenerationEvent
 import com.localai.domain.model.ChatMessage
 import com.localai.domain.model.MessageRole
 import dagger.hilt.android.lifecycle.HiltViewModel
@@ -22,7 +23,8 @@ class ChatViewModel @Inject constructor(
     private val _uiState = MutableStateFlow(ChatUiState())
     val uiState: StateFlow<ChatUiState> = _uiState.asStateFlow()
 
-    private var currentAssistantMessage = ""
+    private var currentAssistantContent = StringBuilder()
+    private var currentThinkingContent = StringBuilder()
     private var modelPath: String = ""
 
     fun loadModel(path: String) {
@@ -57,7 +59,8 @@ class ChatViewModel @Inject constructor(
         val inferenceMessages = stateBeforeSend.messages + userMessage
 
         val assistantMessageId = UUID.randomUUID().toString()
-        currentAssistantMessage = ""
+        currentAssistantContent.clear()
+        currentThinkingContent.clear()
 
         _uiState.update { state ->
             state.copy(
@@ -68,21 +71,41 @@ class ChatViewModel @Inject constructor(
                 ),
                 currentInput = "",
                 isGenerating = true,
+                isThinking = false,
+                thinkingContent = "",
                 error = null
             )
         }
 
         viewModelScope.launch {
             try {
-                aiModelEngine.generate(inferenceMessages).collect { token ->
-                    currentAssistantMessage += token
-                    _uiState.update { state ->
-                        val msgs = state.messages.toMutableList()
-                        val lastIdx = msgs.lastIndex
-                        if (lastIdx >= 0 && msgs[lastIdx].role == MessageRole.ASSISTANT) {
-                            msgs[lastIdx] = msgs[lastIdx].copy(content = currentAssistantMessage)
+                aiModelEngine.generate(inferenceMessages).collect { event ->
+                    when (event) {
+                        is GenerationEvent.ThinkingStarted -> {
+                            _uiState.update { state ->
+                                state.copy(isThinking = true)
+                            }
                         }
-                        state.copy(messages = msgs)
+
+                        is GenerationEvent.ThinkingContent -> {
+                            currentThinkingContent.append(event.text)
+                            _uiState.update { state ->
+                                state.copy(thinkingContent = currentThinkingContent.toString())
+                            }
+                            // Also update the message's thinking content
+                            updateAssistantMessage()
+                        }
+
+                        is GenerationEvent.ThinkingEnded -> {
+                            _uiState.update { state ->
+                                state.copy(isThinking = false)
+                            }
+                        }
+
+                        is GenerationEvent.Content -> {
+                            currentAssistantContent.append(event.text)
+                            updateAssistantMessage()
+                        }
                     }
                 }
             } catch (e: Exception) {
@@ -96,21 +119,60 @@ class ChatViewModel @Inject constructor(
             } finally {
                 _uiState.update { state ->
                     val msgs = state.messages.toMutableList()
-                    val hasEmptyAssistant = msgs.lastOrNull()?.let {
+                    val lastAssistant = msgs.lastOrNull()
+                    val hasEmptyAssistant = lastAssistant?.let {
                         it.role == MessageRole.ASSISTANT && it.content.isEmpty()
                     } == true
+
                     if (hasEmptyAssistant) {
-                        msgs.removeAt(msgs.lastIndex)
-                        state.copy(
-                            messages = msgs,
-                            isGenerating = false,
-                            error = state.error ?: "Model returned no text. Try a different model or prompt."
-                        )
+                        // If we have thinking content but no visible output, that's still valid
+                        // (some models only think and give a brief answer)
+                        val hasThinking = currentThinkingContent.isNotEmpty()
+                        if (hasThinking) {
+                            // Keep the message but note it had only thinking
+                            msgs[msgs.lastIndex] = msgs[msgs.lastIndex].copy(
+                                content = "(Model completed reasoning but produced no visible response)",
+                                thinkingContent = currentThinkingContent.toString()
+                            )
+                            state.copy(
+                                messages = msgs,
+                                isGenerating = false,
+                                isThinking = false,
+                                thinkingContent = ""
+                            )
+                        } else {
+                            msgs.removeAt(msgs.lastIndex)
+                            state.copy(
+                                messages = msgs,
+                                isGenerating = false,
+                                isThinking = false,
+                                thinkingContent = "",
+                                error = state.error ?: "Model returned no text. Try a different model or prompt."
+                            )
+                        }
                     } else {
-                        state.copy(isGenerating = false)
+                        state.copy(
+                            isGenerating = false,
+                            isThinking = false,
+                            thinkingContent = ""
+                        )
                     }
                 }
             }
+        }
+    }
+
+    private fun updateAssistantMessage() {
+        _uiState.update { state ->
+            val msgs = state.messages.toMutableList()
+            val lastIdx = msgs.lastIndex
+            if (lastIdx >= 0 && msgs[lastIdx].role == MessageRole.ASSISTANT) {
+                msgs[lastIdx] = msgs[lastIdx].copy(
+                    content = currentAssistantContent.toString(),
+                    thinkingContent = currentThinkingContent.toString().ifEmpty { null }
+                )
+            }
+            state.copy(messages = msgs)
         }
     }
 

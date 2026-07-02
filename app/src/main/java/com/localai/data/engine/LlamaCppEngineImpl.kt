@@ -3,9 +3,11 @@ package com.localai.data.engine
 import android.util.Log
 import com.localai.data.network.LlamaCppJniBridge
 import com.localai.domain.engine.AIModelEngine
+import com.localai.domain.engine.GenerationEvent
 import com.localai.domain.model.ChatMessage
 import com.localai.domain.util.PromptFormatter
 import com.localai.domain.util.PromptTemplate
+import com.localai.domain.util.SpecialTokenFilter
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flow
@@ -68,14 +70,14 @@ class LlamaCppEngineImpl @Inject constructor() : AIModelEngine {
         }
     }
 
-    override suspend fun generate(messages: List<ChatMessage>): Flow<String> {
+    override suspend fun generate(messages: List<ChatMessage>): Flow<GenerationEvent> {
         if (!isInitialized) {
             throw IllegalStateException("Model not initialized. Call initialize() first.")
         }
         return nativeGenerate(messages)
     }
 
-    private fun nativeGenerate(messages: List<ChatMessage>): Flow<String> = flow {
+    private fun nativeGenerate(messages: List<ChatMessage>): Flow<GenerationEvent> = flow {
         val templates = templateCandidatesForModel(loadedLocalPath)
         for (template in templates) {
             val prompt = PromptFormatter.format(
@@ -89,8 +91,9 @@ class LlamaCppEngineImpl @Inject constructor() : AIModelEngine {
                 "Trying template=${template.label} prompt=${prompt.length} chars (~${PromptFormatter.estimateTokenCount(prompt)} tokens)"
             )
 
+            val filter = SpecialTokenFilter.StreamingFilter()
             var hasVisibleOutput = false
-            val pendingOutput = StringBuilder()
+            var hasAnyOutput = false
 
             // First token: start generation with the prompt
             var token = withContext(Dispatchers.IO) {
@@ -100,15 +103,53 @@ class LlamaCppEngineImpl @Inject constructor() : AIModelEngine {
             // Subsequent tokens: continue generation (null prompt)
             while (token != null) {
                 if (token.isNotEmpty()) {
-                    if (!hasVisibleOutput) {
-                        pendingOutput.append(token)
-                    } else {
-                        emit(token)
-                    }
-                    if (!hasVisibleOutput && pendingOutput.any { !it.isWhitespace() }) {
-                        hasVisibleOutput = true
-                        emit(pendingOutput.toString())
-                        pendingOutput.clear()
+                    val results = filter.process(token)
+                    for (result in results) {
+                        when (result) {
+                            is SpecialTokenFilter.FilterResult.Content -> {
+                                hasVisibleOutput = true
+                                hasAnyOutput = true
+                                emit(GenerationEvent.Content(result.text))
+                            }
+                            is SpecialTokenFilter.FilterResult.ThinkingStart -> {
+                                hasAnyOutput = true
+                                emit(GenerationEvent.ThinkingStarted)
+                            }
+                            is SpecialTokenFilter.FilterResult.ThinkingContent -> {
+                                hasAnyOutput = true
+                                emit(GenerationEvent.ThinkingContent(result.text))
+                            }
+                            is SpecialTokenFilter.FilterResult.ThinkingEnd -> {
+                                hasAnyOutput = true
+                                emit(GenerationEvent.ThinkingEnded)
+                            }
+                            is SpecialTokenFilter.FilterResult.Stop -> {
+                                // Stop sequence detected - flush and terminate
+                                val flushed = filter.flush()
+                                for (f in flushed) {
+                                    when (f) {
+                                        is SpecialTokenFilter.FilterResult.Content -> {
+                                            hasVisibleOutput = true
+                                            emit(GenerationEvent.Content(f.text))
+                                        }
+                                        is SpecialTokenFilter.FilterResult.ThinkingContent -> {
+                                            emit(GenerationEvent.ThinkingContent(f.text))
+                                        }
+                                        else -> { /* ignore */ }
+                                    }
+                                }
+                                if (hasVisibleOutput || hasAnyOutput) return@flow
+                                // If stop came before any output, try next template
+                                break
+                            }
+                            is SpecialTokenFilter.FilterResult.Consumed -> {
+                                // Token was a special token, no output needed
+                                hasAnyOutput = true
+                            }
+                            is SpecialTokenFilter.FilterResult.Buffered -> {
+                                // Token is being buffered for partial match - continue
+                            }
+                        }
                     }
                 }
                 if (!currentCoroutineContext().isActive) break
@@ -117,7 +158,22 @@ class LlamaCppEngineImpl @Inject constructor() : AIModelEngine {
                 }
             }
 
-            if (hasVisibleOutput) {
+            // Flush any remaining buffered content
+            val flushed = filter.flush()
+            for (result in flushed) {
+                when (result) {
+                    is SpecialTokenFilter.FilterResult.Content -> {
+                        hasVisibleOutput = true
+                        emit(GenerationEvent.Content(result.text))
+                    }
+                    is SpecialTokenFilter.FilterResult.ThinkingContent -> {
+                        emit(GenerationEvent.ThinkingContent(result.text))
+                    }
+                    else -> { /* ignore */ }
+                }
+            }
+
+            if (hasVisibleOutput || hasAnyOutput) {
                 return@flow
             }
 
