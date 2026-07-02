@@ -7,6 +7,22 @@
 #include <thread>
 #include <vector>
 
+// ---------------------------------------------------------------------------
+// Compatibility shim for llama.cpp API changes.
+//
+// Recent llama.cpp (b4000+) renamed:
+//   llama_kv_cache_clear(ctx) -> llama_kv_self_clear(ctx)
+//
+// Provide a fallback define so the code compiles on both old and new versions.
+// ---------------------------------------------------------------------------
+#if !defined(llama_kv_self_clear)
+// If llama_kv_self_clear isn't a macro (which it won't be in newer versions
+// where it's a proper function), we attempt to call it directly.
+// If building against an older llama.cpp that only has llama_kv_cache_clear,
+// uncomment the following line:
+// #define llama_kv_self_clear(ctx) llama_kv_cache_clear(ctx)
+#endif
+
 struct NativeContext {
     llama_model      *model      = nullptr;
     llama_context    *ctx        = nullptr;
@@ -17,13 +33,9 @@ struct NativeContext {
     int               step       = 0;
     int               n_ctx      = 0;   // context window size for overflow checks
 
-    // Cached special token IDs for fast stop detection
     std::vector<llama_token> stop_token_ids;
 };
 
-// Known stop sequences to detect at the native level.
-// These are checked by text representation in case the model's vocabulary
-// uses different token IDs.
 static const char * const STOP_SEQUENCES[] = {
     "<|im_end|>",
     "<|eot_id|>",
@@ -33,33 +45,25 @@ static const char * const STOP_SEQUENCES[] = {
     "<end_of_turn>",
     "<|end|>",
     "<|END_OF_TURN_TOKEN|>",
-    nullptr // sentinel
+    nullptr
 };
 
 static void cache_stop_tokens(NativeContext *nc) {
     if (!nc || !nc->vocab) return;
-
     nc->stop_token_ids.clear();
 
-    // Always include the standard EOS token
     llama_token eos = llama_vocab_eos(nc->vocab);
     if (eos >= 0) {
         nc->stop_token_ids.push_back(eos);
     }
 
-    // Try to tokenize each known stop sequence and find its single-token ID.
-    // Many models encode special tokens as a single token.
     for (int i = 0; STOP_SEQUENCES[i] != nullptr; i++) {
         const char *seq = STOP_SEQUENCES[i];
         int seq_len = (int) std::strlen(seq);
-
-        // Try to tokenize with special token parsing enabled
         int n = llama_tokenize(nc->vocab, seq, seq_len, nullptr, 0, false, true);
         if (n == 1) {
-            // It's a single token - cache its ID
             llama_token tok;
             llama_tokenize(nc->vocab, seq, seq_len, &tok, 1, false, true);
-            // Avoid duplicates
             bool found = false;
             for (auto &existing : nc->stop_token_ids) {
                 if (existing == tok) { found = true; break; }
@@ -88,10 +92,10 @@ static llama_sampler * make_default_sampler() {
     return s;
 }
 
+
 // ---------------------------------------------------------------
 // loadModelNative
 // ---------------------------------------------------------------
-
 extern "C" JNIEXPORT jlong JNICALL
 Java_com_localai_data_network_LlamaCppJniBridge_loadModelNative(
     JNIEnv *env, jobject /* thiz */, jstring model_path)
@@ -137,19 +141,18 @@ Java_com_localai_data_network_LlamaCppJniBridge_loadModelNative(
 // ---------------------------------------------------------------
 // freeModelNative
 // ---------------------------------------------------------------
-
 extern "C" JNIEXPORT void JNICALL
 Java_com_localai_data_network_LlamaCppJniBridge_freeModelNative(
     JNIEnv * /* env */, jobject /* thiz */, jlong context_ptr)
 {
     NativeContext *nc = reinterpret_cast<NativeContext *>(context_ptr);
     if (!nc) return;
-
     if (nc->smpl)  llama_sampler_free(nc->smpl);
     if (nc->ctx)   llama_free(nc->ctx);
     if (nc->model) llama_model_free(nc->model);
     delete nc;
 }
+
 
 // ---------------------------------------------------------------
 // resetContextNative
@@ -234,7 +237,40 @@ Java_com_localai_data_network_LlamaCppJniBridge_tokenizeCountNative(
 //   (e.g., showing thinking indicators). Only true stop/end tokens
 //   cause generation to terminate.
 // ---------------------------------------------------------------
+extern "C" JNIEXPORT jint JNICALL
+Java_com_localai_data_network_LlamaCppJniBridge_getContextSizeNative(
+    JNIEnv * /* env */, jobject /* thiz */, jlong context_ptr)
+{
+    NativeContext *nc = reinterpret_cast<NativeContext *>(context_ptr);
+    if (!nc) return 0;
+    return (jint) nc->n_ctx;
+}
 
+// ---------------------------------------------------------------
+// tokenizeCountNative
+// ---------------------------------------------------------------
+extern "C" JNIEXPORT jint JNICALL
+Java_com_localai_data_network_LlamaCppJniBridge_tokenizeCountNative(
+    JNIEnv *env, jobject /* thiz */, jlong context_ptr, jstring text)
+{
+    NativeContext *nc = reinterpret_cast<NativeContext *>(context_ptr);
+    if (!nc || !nc->vocab) return -1;
+
+    const char *text_str = env->GetStringUTFChars(text, nullptr);
+    if (!text_str) return -1;
+
+    int n_tokens = llama_tokenize(
+        nc->vocab, text_str, std::strlen(text_str),
+        nullptr, 0, true, true);
+
+    env->ReleaseStringUTFChars(text, text_str);
+    return (jint)(n_tokens > 0 ? n_tokens : 0);
+}
+
+
+// ---------------------------------------------------------------
+// generateStreamingTokenNative
+// ---------------------------------------------------------------
 extern "C" JNIEXPORT jstring JNICALL
 Java_com_localai_data_network_LlamaCppJniBridge_generateStreamingTokenNative(
     JNIEnv *env, jobject /* thiz */, jlong context_ptr, jstring prompt)
@@ -242,7 +278,7 @@ Java_com_localai_data_network_LlamaCppJniBridge_generateStreamingTokenNative(
     NativeContext *nc = reinterpret_cast<NativeContext *>(context_ptr);
     if (!nc || !nc->ctx) return nullptr;
 
-    // ---------- new generation ----------------------------------------------
+    // ---------- new generation -------------------------------------------
     if (prompt != nullptr) {
         // CRITICAL: Clear KV cache before starting new generation.
         // Without this, stale KV entries from prior generations corrupt
@@ -280,7 +316,6 @@ Java_com_localai_data_network_LlamaCppJniBridge_generateStreamingTokenNative(
         int actual = llama_tokenize(
             nc->vocab, prompt_str, std::strlen(prompt_str),
             tokens.data(), tokens.size(), true, true);
-
         env->ReleaseStringUTFChars(prompt, prompt_str);
 
         if (actual <= 0) return nullptr;
@@ -318,10 +353,9 @@ Java_com_localai_data_network_LlamaCppJniBridge_generateStreamingTokenNative(
         }
 
         nc->generating = true;
-        // fall through to produce the first output token
     }
 
-    // ---------- continue generation -----------------------------------------
+    // ---------- continue generation --------------------------------------
     if (!nc->generating) return nullptr;
 
     // Check if we've exceeded the context window
@@ -336,33 +370,26 @@ Java_com_localai_data_network_LlamaCppJniBridge_generateStreamingTokenNative(
         return nullptr;
     }
 
-    // sample next token
     llama_token new_token_id = llama_sampler_sample(nc->smpl, nc->ctx, -1);
 
-    // Check against all cached stop tokens (EOS + model-specific stops)
     if (new_token_id < 0 || is_stop_token(nc, new_token_id)) {
         nc->generating = false;
         return nullptr;
     }
 
-    // Detokenize with a growable buffer.
-    // We pass special=true so special tokens are rendered as their text
-    // representation (e.g., "<think>") rather than being silently dropped.
-    // The Kotlin SpecialTokenFilter handles the semantic processing.
+    // Detokenize
     std::vector<char> piece_buf(64);
-    int len = llama_token_to_piece(nc->vocab, new_token_id, piece_buf.data(), (int32_t) piece_buf.size(), 0, true);
+    int len = llama_token_to_piece(nc->vocab, new_token_id,
+        piece_buf.data(), (int32_t) piece_buf.size(), 0, true);
     if (len < 0) {
         piece_buf.resize((size_t) -len);
-        len = llama_token_to_piece(nc->vocab, new_token_id, piece_buf.data(), (int32_t) piece_buf.size(), 0, true);
+        len = llama_token_to_piece(nc->vocab, new_token_id,
+            piece_buf.data(), (int32_t) piece_buf.size(), 0, true);
     }
     std::string piece;
-    if (len > 0) {
-        piece.assign(piece_buf.data(), (size_t) len);
-    }
+    if (len > 0) piece.assign(piece_buf.data(), (size_t) len);
 
-    // Check if the detokenized text itself is a known stop sequence.
-    // This handles cases where the model's tokenizer splits stop sequences
-    // differently than expected.
+    // Check text-based stop sequences
     if (len > 0) {
         for (int i = 0; STOP_SEQUENCES[i] != nullptr; i++) {
             if (piece == STOP_SEQUENCES[i]) {
@@ -372,7 +399,7 @@ Java_com_localai_data_network_LlamaCppJniBridge_generateStreamingTokenNative(
         }
     }
 
-    // feed token back for next iteration
+    // Feed token back
     {
         llama_batch batch = llama_batch_init(1, 0, 1);
         batch.token[0]     = new_token_id;
