@@ -15,7 +15,67 @@ struct NativeContext {
     bool              generating = false;
     int               n_past     = 0;
     int               step       = 0;
+
+    // Cached special token IDs for fast stop detection
+    std::vector<llama_token> stop_token_ids;
 };
+
+// Known stop sequences to detect at the native level.
+// These are checked by text representation in case the model's vocabulary
+// uses different token IDs.
+static const char * const STOP_SEQUENCES[] = {
+    "<|im_end|>",
+    "<|eot_id|>",
+    "<|end_of_text|>",
+    "<|endoftext|>",
+    "</s>",
+    "<end_of_turn>",
+    "<|end|>",
+    "<|END_OF_TURN_TOKEN|>",
+    nullptr // sentinel
+};
+
+static void cache_stop_tokens(NativeContext *nc) {
+    if (!nc || !nc->vocab) return;
+
+    nc->stop_token_ids.clear();
+
+    // Always include the standard EOS token
+    llama_token eos = llama_vocab_eos(nc->vocab);
+    if (eos >= 0) {
+        nc->stop_token_ids.push_back(eos);
+    }
+
+    // Try to tokenize each known stop sequence and find its single-token ID.
+    // Many models encode special tokens as a single token.
+    for (int i = 0; STOP_SEQUENCES[i] != nullptr; i++) {
+        const char *seq = STOP_SEQUENCES[i];
+        int seq_len = (int) std::strlen(seq);
+
+        // Try to tokenize with special token parsing enabled
+        int n = llama_tokenize(nc->vocab, seq, seq_len, nullptr, 0, false, true);
+        if (n == 1) {
+            // It's a single token - cache its ID
+            llama_token tok;
+            llama_tokenize(nc->vocab, seq, seq_len, &tok, 1, false, true);
+            // Avoid duplicates
+            bool found = false;
+            for (auto &existing : nc->stop_token_ids) {
+                if (existing == tok) { found = true; break; }
+            }
+            if (!found) {
+                nc->stop_token_ids.push_back(tok);
+            }
+        }
+    }
+}
+
+static bool is_stop_token(const NativeContext *nc, llama_token token) {
+    for (auto &stop : nc->stop_token_ids) {
+        if (token == stop) return true;
+    }
+    return false;
+}
 
 static llama_sampler * make_default_sampler() {
     auto sparams = llama_sampler_chain_default_params();
@@ -64,6 +124,9 @@ Java_com_localai_data_network_LlamaCppJniBridge_loadModelNative(
     nc->vocab = llama_model_get_vocab(model);
     nc->smpl  = make_default_sampler();
 
+    // Pre-cache stop token IDs for fast detection during generation
+    cache_stop_tokens(nc);
+
     return reinterpret_cast<jlong>(nc);
 }
 
@@ -87,9 +150,14 @@ Java_com_localai_data_network_LlamaCppJniBridge_freeModelNative(
 // ---------------------------------------------------------------
 // generateStreamingTokenNative
 //
-//   prompt != null  → start new generation, return first token
-//   prompt == null  → continue generation, return next token
-//   returns null on EOS / error
+//   prompt != null  -> start new generation, return first token
+//   prompt == null  -> continue generation, return next token
+//   returns null on EOS / stop token / error
+//
+//   Special tokens (thinking markers, role markers, etc.) are passed
+//   through as text so the Kotlin layer can properly handle them
+//   (e.g., showing thinking indicators). Only true stop/end tokens
+//   cause generation to terminate.
 // ---------------------------------------------------------------
 
 extern "C" JNIEXPORT jstring JNICALL
@@ -123,7 +191,7 @@ Java_com_localai_data_network_LlamaCppJniBridge_generateStreamingTokenNative(
 
         env->ReleaseStringUTFChars(prompt, prompt_str);
 
-        // eval the full prompt — explicit positions, seq 0
+        // eval the full prompt - explicit positions, seq 0
         {
             llama_batch batch = llama_batch_init(n_tokens, 0, 1);
             for (int i = 0; i < n_tokens; i++) {
@@ -155,12 +223,16 @@ Java_com_localai_data_network_LlamaCppJniBridge_generateStreamingTokenNative(
     // sample next token
     llama_token new_token_id = llama_sampler_sample(nc->smpl, nc->ctx, -1);
 
-    if (new_token_id < 0 || new_token_id == llama_vocab_eos(nc->vocab)) {
+    // Check against all cached stop tokens (EOS + model-specific stops)
+    if (new_token_id < 0 || is_stop_token(nc, new_token_id)) {
         nc->generating = false;
         return nullptr;
     }
 
-    // detokenize with a growable buffer (fixed tiny buffers can overflow/corrupt output)
+    // Detokenize with a growable buffer.
+    // We pass special=true so special tokens are rendered as their text
+    // representation (e.g., "<think>") rather than being silently dropped.
+    // The Kotlin SpecialTokenFilter handles the semantic processing.
     std::vector<char> piece_buf(64);
     int len = llama_token_to_piece(nc->vocab, new_token_id, piece_buf.data(), (int32_t) piece_buf.size(), 0, true);
     if (len < 0) {
@@ -172,7 +244,19 @@ Java_com_localai_data_network_LlamaCppJniBridge_generateStreamingTokenNative(
         piece.assign(piece_buf.data(), (size_t) len);
     }
 
-    // feed token back
+    // Check if the detokenized text itself is a known stop sequence.
+    // This handles cases where the model's tokenizer splits stop sequences
+    // differently than expected.
+    if (len > 0) {
+        for (int i = 0; STOP_SEQUENCES[i] != nullptr; i++) {
+            if (piece == STOP_SEQUENCES[i]) {
+                nc->generating = false;
+                return nullptr;
+            }
+        }
+    }
+
+    // feed token back for next iteration
     {
         llama_batch batch = llama_batch_init(1, 0, 1);
         batch.token[0]     = new_token_id;
