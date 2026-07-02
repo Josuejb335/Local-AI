@@ -32,6 +32,24 @@ object LlamaCppJniBridge {
 
     external fun freeModelNative(contextPtr: Long)
 
+    /**
+     * Reset the native context: clears the KV cache and resets all internal state.
+     * MUST be called before starting a new generation to prevent context overflow.
+     */
+    external fun resetContextNative(contextPtr: Long)
+
+    /**
+     * Returns the configured context window size (n_ctx) for the loaded model.
+     */
+    external fun getContextSizeNative(contextPtr: Long): Int
+
+    /**
+     * Returns the actual token count for the given text using the model's tokenizer.
+     * Much more accurate than character-based estimates.
+     * Returns -1 on error.
+     */
+    external fun tokenizeCountNative(contextPtr: Long, text: String): Int
+
     external fun generateStreamingTokenNative(
         contextPtr: Long,
         prompt: String?

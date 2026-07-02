@@ -23,6 +23,7 @@ class LlamaCppEngineImpl @Inject constructor() : AIModelEngine {
     private var nativeContextPtr: Long = 0L
     private var loadedLocalPath: String = ""
     private var isInitialized = false
+    private var contextSize: Int = DEFAULT_CONTEXT_TOKENS
 
     override suspend fun initialize(localPath: String): Result<Unit> = withContext(Dispatchers.IO) {
         if (isInitialized && nativeContextPtr != 0L) {
@@ -49,7 +50,13 @@ class LlamaCppEngineImpl @Inject constructor() : AIModelEngine {
             }
             nativeContextPtr = ptr
             isInitialized = true
-            Log.i(TAG, "Native model loaded: $localPath")
+
+
+            // Query the actual context size from the native layer
+            contextSize = LlamaCppJniBridge.getContextSizeNative(ptr)
+            if (contextSize <= 0) contextSize = DEFAULT_CONTEXT_TOKENS
+            Log.i(TAG, "Native model loaded: $localPath (context=$contextSize tokens)")
+
             Result.success(Unit)
         } catch (e: UnsatisfiedLinkError) {
             Log.e(TAG, "Native library link error", e)
@@ -77,27 +84,66 @@ class LlamaCppEngineImpl @Inject constructor() : AIModelEngine {
         return nativeGenerate(messages)
     }
 
+    /**
+     * Get the actual token count for text using the model's tokenizer.
+     * Falls back to the character-based estimate if native call fails.
+     */
+    private fun getActualTokenCount(text: String): Int {
+        if (nativeContextPtr == 0L) return PromptFormatter.estimateTokenCount(text)
+        val count = LlamaCppJniBridge.tokenizeCountNative(nativeContextPtr, text)
+        return if (count >= 0) count else PromptFormatter.estimateTokenCount(text)
+    }
+
     private fun nativeGenerate(messages: List<ChatMessage>): Flow<GenerationEvent> = flow {
         val templates = templateCandidatesForModel(loadedLocalPath)
+
+        // Reserve tokens for generation output (at least 256, up to 1/4 of context)
+        val reserveForGeneration = (contextSize / 4).coerceIn(MIN_GENERATION_TOKENS, contextSize / 2)
+        val maxPromptTokens = contextSize - reserveForGeneration
+
         for (template in templates) {
             val prompt = PromptFormatter.format(
                 messages = messages,
                 template = template,
-                maxContextTokens = MAX_CONTEXT_TOKENS
+                maxContextTokens = maxPromptTokens
             )
+
+            // Use actual tokenizer to verify the prompt fits
+            val actualPromptTokens = withContext(Dispatchers.IO) {
+                getActualTokenCount(prompt)
+            }
 
             Log.d(
                 TAG,
-                "Trying template=${template.label} prompt=${prompt.length} chars (~${PromptFormatter.estimateTokenCount(prompt)} tokens)"
+                "Trying template=${template.label} prompt=${prompt.length} chars " +
+                "(actual=$actualPromptTokens tokens, limit=$maxPromptTokens, ctx=$contextSize)"
             )
+
+
+            // If prompt is still too large after formatting, skip this template
+            if (actualPromptTokens > contextSize - MIN_GENERATION_TOKENS) {
+                Log.w(TAG, "Prompt ($actualPromptTokens tokens) exceeds safe limit, trying next template")
+                continue
+            }
+
+            // CRITICAL: Reset context before each generation attempt.
+            // This clears the KV cache and prevents crashes from stale state.
+            withContext(Dispatchers.IO) {
+                LlamaCppJniBridge.resetContextNative(nativeContextPtr)
+            }
 
             val filter = SpecialTokenFilter.StreamingFilter()
             var hasVisibleOutput = false
             var hasAnyOutput = false
 
             // First token: start generation with the prompt
-            var token = withContext(Dispatchers.IO) {
-                LlamaCppJniBridge.generateStreamingTokenNative(nativeContextPtr, prompt)
+            var token: String? = try {
+                withContext(Dispatchers.IO) {
+                    LlamaCppJniBridge.generateStreamingTokenNative(nativeContextPtr, prompt)
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "Native generation failed on prompt submission", e)
+                null
             }
 
             // Subsequent tokens: continue generation (null prompt)
@@ -124,7 +170,6 @@ class LlamaCppEngineImpl @Inject constructor() : AIModelEngine {
                                 emit(GenerationEvent.ThinkingEnded)
                             }
                             is SpecialTokenFilter.FilterResult.Stop -> {
-                                // Stop sequence detected - flush and terminate
                                 val flushed = filter.flush()
                                 for (f in flushed) {
                                     when (f) {
@@ -139,24 +184,28 @@ class LlamaCppEngineImpl @Inject constructor() : AIModelEngine {
                                     }
                                 }
                                 if (hasVisibleOutput || hasAnyOutput) return@flow
-                                // If stop came before any output, try next template
                                 break
                             }
                             is SpecialTokenFilter.FilterResult.Consumed -> {
-                                // Token was a special token, no output needed
                                 hasAnyOutput = true
                             }
                             is SpecialTokenFilter.FilterResult.Buffered -> {
-                                // Token is being buffered for partial match - continue
+                                // Token is being buffered for partial match
                             }
                         }
                     }
                 }
                 if (!currentCoroutineContext().isActive) break
-                token = withContext(Dispatchers.IO) {
-                    LlamaCppJniBridge.generateStreamingTokenNative(nativeContextPtr, null)
+                token = try {
+                    withContext(Dispatchers.IO) {
+                        LlamaCppJniBridge.generateStreamingTokenNative(nativeContextPtr, null)
+                    }
+                } catch (e: Exception) {
+                    Log.e(TAG, "Native generation failed during token streaming", e)
+                    null
                 }
             }
+
 
             // Flush any remaining buffered content
             val flushed = filter.flush()
@@ -207,10 +256,12 @@ class LlamaCppEngineImpl @Inject constructor() : AIModelEngine {
         nativeContextPtr = 0L
         loadedLocalPath = ""
         isInitialized = false
+        contextSize = DEFAULT_CONTEXT_TOKENS
     }
 
     companion object {
         private const val TAG = "LlamaCpp"
-        private const val MAX_CONTEXT_TOKENS = 2048
+        private const val DEFAULT_CONTEXT_TOKENS = 2048
+        private const val MIN_GENERATION_TOKENS = 256
     }
 }
