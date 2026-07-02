@@ -31,7 +31,7 @@ struct NativeContext {
     bool              generating = false;
     int               n_past     = 0;
     int               step       = 0;
-    int               n_ctx      = 0;
+    int               n_ctx      = 0;   // context window size for overflow checks
 
     std::vector<llama_token> stop_token_ids;
 };
@@ -114,7 +114,7 @@ Java_com_localai_data_network_LlamaCppJniBridge_loadModelNative(
     c_params.n_ctx = ctx_size;
     const unsigned int hw_threads = std::thread::hardware_concurrency();
     c_params.n_threads = (int32_t) std::clamp(hw_threads > 0 ? hw_threads - 1 : 2u, 1u, 6u);
-    c_params.n_batch = 512;
+    c_params.n_batch = 512;  // Larger batch for faster prompt processing
 
     llama_context *ctx = llama_init_from_model(model, c_params);
     if (!ctx) {
@@ -131,6 +131,8 @@ Java_com_localai_data_network_LlamaCppJniBridge_loadModelNative(
     nc->vocab = llama_model_get_vocab(model);
     nc->smpl  = make_default_sampler();
     nc->n_ctx = ctx_size;
+
+    // Pre-cache stop token IDs for fast detection during generation
     cache_stop_tokens(nc);
 
     return reinterpret_cast<jlong>(nc);
@@ -153,8 +155,13 @@ Java_com_localai_data_network_LlamaCppJniBridge_freeModelNative(
 
 
 // ---------------------------------------------------------------
-// resetContextNative — clears KV cache and resets state
+// resetContextNative
+//
+//   Clears the KV cache and resets internal state.
+//   MUST be called before starting a new conversation turn to
+//   prevent KV cache overflow/corruption.
 // ---------------------------------------------------------------
+
 extern "C" JNIEXPORT void JNICALL
 Java_com_localai_data_network_LlamaCppJniBridge_resetContextNative(
     JNIEnv * /* env */, jobject /* thiz */, jlong context_ptr)
@@ -162,13 +169,12 @@ Java_com_localai_data_network_LlamaCppJniBridge_resetContextNative(
     NativeContext *nc = reinterpret_cast<NativeContext *>(context_ptr);
     if (!nc || !nc->ctx) return;
 
-    // Clear KV cache — use whichever API is available
-    llama_kv_self_clear(nc->ctx);
-
+    llama_kv_cache_clear(nc->ctx);
     nc->n_past     = 0;
     nc->step       = 0;
     nc->generating = false;
 
+    // Reset the sampler state as well
     if (nc->smpl) {
         llama_sampler_reset(nc->smpl);
     }
@@ -176,6 +182,60 @@ Java_com_localai_data_network_LlamaCppJniBridge_resetContextNative(
 
 // ---------------------------------------------------------------
 // getContextSizeNative
+//
+//   Returns the configured context window size (n_ctx).
+// ---------------------------------------------------------------
+
+extern "C" JNIEXPORT jint JNICALL
+Java_com_localai_data_network_LlamaCppJniBridge_getContextSizeNative(
+    JNIEnv * /* env */, jobject /* thiz */, jlong context_ptr)
+{
+    NativeContext *nc = reinterpret_cast<NativeContext *>(context_ptr);
+    if (!nc) return 0;
+    return (jint) nc->n_ctx;
+}
+
+// ---------------------------------------------------------------
+// tokenizeCountNative
+//
+//   Returns the actual number of tokens for a given text using
+//   the model's real tokenizer. This is much more accurate than
+//   character-based estimates.
+// ---------------------------------------------------------------
+
+extern "C" JNIEXPORT jint JNICALL
+Java_com_localai_data_network_LlamaCppJniBridge_tokenizeCountNative(
+    JNIEnv *env, jobject /* thiz */, jlong context_ptr, jstring text)
+{
+    NativeContext *nc = reinterpret_cast<NativeContext *>(context_ptr);
+    if (!nc || !nc->vocab) return -1;
+
+    const char *text_str = env->GetStringUTFChars(text, nullptr);
+    if (!text_str) return -1;
+
+    int n_tokens = llama_tokenize(
+        nc->vocab, text_str, std::strlen(text_str),
+        nullptr, 0, true, true);
+
+    env->ReleaseStringUTFChars(text, text_str);
+    return (jint)(n_tokens > 0 ? n_tokens : 0);
+}
+
+// ---------------------------------------------------------------
+// generateStreamingTokenNative
+//
+//   prompt != null  -> start new generation, return first token
+//   prompt == null  -> continue generation, return next token
+//   returns null on EOS / stop token / error / context overflow
+//
+//   IMPORTANT: Call resetContextNative() before passing a new prompt
+//   to ensure the KV cache is clean. If not called, this function
+//   will clear it automatically when a prompt is provided.
+//
+//   Special tokens (thinking markers, role markers, etc.) are passed
+//   through as text so the Kotlin layer can properly handle them
+//   (e.g., showing thinking indicators). Only true stop/end tokens
+//   cause generation to terminate.
 // ---------------------------------------------------------------
 extern "C" JNIEXPORT jint JNICALL
 Java_com_localai_data_network_LlamaCppJniBridge_getContextSizeNative(
@@ -220,12 +280,16 @@ Java_com_localai_data_network_LlamaCppJniBridge_generateStreamingTokenNative(
 
     // ---------- new generation -------------------------------------------
     if (prompt != nullptr) {
-        // CRITICAL: Clear KV cache before new generation to prevent crash
-        llama_kv_self_clear(nc->ctx);
+        // CRITICAL: Clear KV cache before starting new generation.
+        // Without this, stale KV entries from prior generations corrupt
+        // the attention computation and eventually cause a crash when
+        // n_past exceeds n_ctx.
+        llama_kv_cache_clear(nc->ctx);
         nc->generating = false;
         nc->n_past     = 0;
         nc->step       = 0;
 
+        // Reset sampler state for fresh generation
         if (nc->smpl) {
             llama_sampler_reset(nc->smpl);
         }
@@ -241,7 +305,8 @@ Java_com_localai_data_network_LlamaCppJniBridge_generateStreamingTokenNative(
             return nullptr;
         }
 
-        // Cap prompt to fit in context window (leave room for generation)
+        // Safety check: ensure prompt fits within context window
+        // Leave room for at least some generation tokens
         const int max_prompt_tokens = nc->n_ctx - 64;
         if (n_tokens > max_prompt_tokens) {
             n_tokens = max_prompt_tokens;
@@ -254,18 +319,24 @@ Java_com_localai_data_network_LlamaCppJniBridge_generateStreamingTokenNative(
         env->ReleaseStringUTFChars(prompt, prompt_str);
 
         if (actual <= 0) return nullptr;
-        if (actual > (int) tokens.size()) actual = (int) tokens.size();
 
-        // Process prompt in batches
+        // Cap to our buffer size (safety)
+        if (actual > (int) tokens.size()) {
+            actual = (int) tokens.size();
+        }
+
+        // Process prompt in batches to handle large prompts safely
         const int n_batch = 512;
         for (int i = 0; i < actual; i += n_batch) {
             int batch_size = std::min(n_batch, actual - i);
+
             llama_batch batch = llama_batch_init(batch_size, 0, 1);
             for (int j = 0; j < batch_size; j++) {
                 batch.token[j]     = tokens[i + j];
                 batch.pos[j]       = nc->n_past++;
                 batch.n_seq_id[j]  = 1;
                 batch.seq_id[j][0] = 0;
+                // Only compute logits for the very last token of the entire prompt
                 batch.logits[j]    = (i + j == actual - 1);
             }
             batch.n_tokens = batch_size;
@@ -273,7 +344,8 @@ Java_com_localai_data_network_LlamaCppJniBridge_generateStreamingTokenNative(
             int ret = llama_decode(nc->ctx, batch);
             llama_batch_free(batch);
             if (ret != 0) {
-                llama_kv_self_clear(nc->ctx);
+                // Decode failed - context might be corrupted, reset everything
+                llama_kv_cache_clear(nc->ctx);
                 nc->n_past = 0;
                 nc->generating = false;
                 return nullptr;
@@ -286,7 +358,14 @@ Java_com_localai_data_network_LlamaCppJniBridge_generateStreamingTokenNative(
     // ---------- continue generation --------------------------------------
     if (!nc->generating) return nullptr;
 
-    if (nc->n_past >= nc->n_ctx - 1 || nc->step >= (nc->n_ctx - 64)) {
+    // Check if we've exceeded the context window
+    if (nc->n_past >= nc->n_ctx - 1) {
+        nc->generating = false;
+        return nullptr;
+    }
+
+    // Cap total generation steps to prevent runaway generation
+    if (nc->step >= (nc->n_ctx - 64)) {
         nc->generating = false;
         return nullptr;
     }
@@ -333,6 +412,7 @@ Java_com_localai_data_network_LlamaCppJniBridge_generateStreamingTokenNative(
         int ret = llama_decode(nc->ctx, batch);
         llama_batch_free(batch);
         if (ret != 0) {
+            // If decode fails during generation, stop gracefully
             nc->generating = false;
             return nullptr;
         }
